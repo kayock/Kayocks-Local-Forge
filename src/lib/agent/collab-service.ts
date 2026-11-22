@@ -205,7 +205,8 @@ export async function launchCollaborativeTask(
 // conflict detection. Every event flows into the SAME stream the collab UI
 // renders — no simulated progress, only real agent execution.
 // ---------------------------------------------------------------------------
-import { FanoutRunner, type FanoutMachine, type FanoutTaskSpec, type FanoutReport, type FanoutStage } from './fanout';
+import { FanoutRunner, type FanoutMachine, type FanoutTaskSpec, type FanoutTaskResult, type FanoutReport, type FanoutStage } from './fanout';
+import type { TaskContract } from './task-contract';
 import { AgentRunner } from './runner';
 import { toolsByNames } from './tools';
 import { createContract, contractPromptBlock } from './task-contract';
@@ -240,6 +241,78 @@ const PLANNER_TASKS_TOOL = {
     },
   },
 };
+
+/**
+ * THE production entry the Control Center "Start collaborative task" button
+ * calls. Dispatches on the user-selected execution mode:
+ *  - 'fanout'  → runDistributedFanout (planner task graph → FanoutRunner →
+ *                mesh packets → parallel agents on their machines)
+ *  - otherwise → launchCollaborativeTask (sequential/pipeline coordinator)
+ * Returns a normalized control surface (pause/stop/steer) and a normalized
+ * report promise so the UI lifecycle is identical for both engines.
+ */
+export type CollabRunMode = 'sequential' | 'parallel' | 'pipeline' | 'fanout';
+
+export interface CollabRunHandle {
+  kind: 'fanout' | 'sequential';
+  // sequential only — powers the per-stage report actions (continue/reassign);
+  // fan-out tasks carry their own retry/reassignment inside the runner.
+  coordinator?: Coordinator;
+  control: {
+    requestPause(): void;
+    requestStop(): void;
+    steerAgent(agentId: string, text: string): boolean;
+    steerAll(text: string): void;
+  };
+  done: Promise<CoordinatorReport & { fanout?: { completed: number; failed: number; cancelled: number; tasks: FanoutTaskResult[] } }>;
+  contract: TaskContract | null;
+}
+
+export async function startCollabRun(
+  mode: CollabRunMode,
+  cfg: CollabTaskConfig,
+  opts: Parameters<typeof launchCollaborativeTask>[1],
+): Promise<CollabRunHandle> {
+  if (mode === 'fanout') {
+    const { runner, done, contract } = await runDistributedFanout(cfg, opts);
+    return {
+      kind: 'fanout',
+      control: {
+        requestPause: () => runner.pauseAll(),
+        requestStop: () => runner.cancel(),
+        steerAgent: (id, text) => { runner.steer(id, text); return true; },
+        steerAll: (text) => { runner.steerAll(text); },
+      },
+      done: done.then((r: FanoutReport) => ({
+        // normalized into the coordinator report shape the UI already renders
+        verdict: r.failed === 0 && r.completed > 0 ? 'APPROVE' : r.completed > 0 ? 'REQUEST_CHANGES' : 'UNKNOWN',
+        results: [],
+        totalTurns: r.totalTurns,
+        rework: 0,
+        turns: r.totalTurns,
+        conflicts: r.conflicts,
+        fanout: { completed: r.completed, failed: r.failed, cancelled: r.cancelled, tasks: r.results },
+      } as unknown as CoordinatorReport & { fanout: { completed: number; failed: number; cancelled: number; tasks: FanoutTaskResult[] } })),
+      contract: contract as TaskContract | null,
+    };
+  }
+  // The sequential coordinator owns its contract internally (created at run
+  // time); the UI lifecycle never needed it externally — keep parity.
+  const { coordinator, done } = await launchCollaborativeTask(cfg, opts);
+  return {
+    kind: 'sequential',
+    coordinator,
+    control: {
+      requestPause: () => coordinator.requestPause(),
+      requestStop: () => coordinator.requestStop(),
+      steerAgent: (id, text) => coordinator.steerAgent(id, text),
+      steerAll: (text) => coordinator.steerAll(text),
+    },
+    done,
+    contract: null,
+  };
+}
+
 
 // Validates a planner-produced task graph: keys unique, deps exist and are
 // acyclic, assignments resolve to a participating machine, parallelism cap.

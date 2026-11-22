@@ -16,7 +16,7 @@ import { useMesh } from '@/lib/store/mesh';
 import { useWorkspace } from '@/lib/store/workspace';
 import { useSettings } from '@/lib/store/settings';
 import { CompanionClient } from '@/lib/companion/client';
-import { clientForMachine, launchCollaborativeTask, runDistributedFanout, type CollabParticipant, type CollabTaskConfig, type CollabRole } from '@/lib/agent/collab-service';
+import { clientForMachine, launchCollaborativeTask, runDistributedFanout, startCollabRun, type CollabRunMode, type CollabRunHandle, type CollabParticipant, type CollabTaskConfig, type CollabRole } from '@/lib/agent/collab-service';
 import type { ProtocolSetting } from '@/lib/store/settings';
 import type { AgentEvent } from '@/lib/agent/types';
 import type { CoordinatorReport } from '@/lib/agent/coordinator';
@@ -793,7 +793,7 @@ function NotebookTab() {
 
 // ---------------------------------------------------------------------------
 // Collaborate: the REAL multi-agent launch workflow (Phase 2.1 Priority 3).
-// The Start button calls launchCollaborativeTask() — the SAME function the
+// The Start button calls startCollabRun() — the SAME production dispatcher the
 // acceptance tests call — which instantiates the real Coordinator with
 // mesh-routed companions. Nothing here is a diagram.
 // ---------------------------------------------------------------------------
@@ -829,7 +829,7 @@ function CollaborateTab() {
   const [report, setReport] = useState<CoordinatorReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [steerText, setSteerText] = useState('');
-  const runRef = useRef<{ coordinator: import('@/lib/agent/coordinator').Coordinator; done: Promise<CoordinatorReport> } | null>(null);
+  const runRef = useRef<CollabRunHandle | null>(null);
   const feedRef = useRef<HTMLDivElement>(null);
 
   // ---- Authoritative workspace host (Phase 2.2 Fix 2) — a REAL selector:
@@ -908,14 +908,14 @@ function CollaborateTab() {
     };
     setRunning(true);
     try {
-      const { coordinator, done } = await launchCollaborativeTask(cfg, {
+      const handle = await startCollabRun(mode as CollabRunMode, cfg, {
         mesh: mesh.client(),
         workspaceHost: wsHostClient,
         workspaceId: wsRec.id,
         workspacePath: wsRec.path,
         workspaceContext: { platform: hostPlatform || 'linux', workspacePath: wsRec.path },
         approver: async () => 'allow',
-        onEvent: (e: AgentEvent & { stage?: string; agentId?: string }) => {
+        onEvent: (e: AgentEvent & { stage?: string; agentId?: string; fanoutKey?: string }) => {
           const agentId = (e as any).agentId as string | undefined;
           if (e.type === 'stage' && agentId) {
             setAgents((a) => ({ ...a, [agentId]: { agentId, stage: (e as any).stage || '?', state: 'working', turns: 0, escalations: [] } }));
@@ -935,13 +935,16 @@ function CollaborateTab() {
           if ((e as any).paused && agentId) setAgents((a) => a[agentId] ? { ...a, [agentId]: { ...a[agentId], state: 'paused' } } : a);
         },
       });
-      runRef.current = { coordinator, done };
-      pushFeed('Collaborative task launched — real Coordinator running.');
-      const r = await done;
+      runRef.current = handle;
+      pushFeed(handle.kind === 'fanout'
+        ? `Distributed fan-out launched — planner task graph scheduled across ${participants.length} machine(s).`
+        : 'Collaborative task launched — real Coordinator running.');
+      const r = await handle.done;
       setReport(r);
       mesh.refreshAssignments(wsRec.id);
       mesh.refreshNotebook(wsRec.id);
-      pushFeed(`Coordinator finished — verdict: ${r.verdict}, ${r.totalTurns} turns${r.conflicts.length ? `, ${r.conflicts.length} conflict(s)` : ''}.`);
+      const fanoutCounts = (r as any).fanout ? ` — ${((r as any).fanout.completed)} completed, ${((r as any).fanout.failed)} failed` : '';
+      pushFeed(`${handle.kind === 'fanout' ? 'Fan-out' : 'Coordinator'} finished — verdict: ${r.verdict}, ${r.totalTurns} turns${r.conflicts.length ? `, ${r.conflicts.length} conflict(s)` : ''}${fanoutCounts}.`);
     } catch (e: any) {
       setError(String(e.message || e));
     } finally {
@@ -951,7 +954,7 @@ function CollaborateTab() {
 
   const steerAgentById = (agentId: string) => {
     if (!steerText.trim()) return;
-    const ok = runRef.current?.coordinator.steerAgent(agentId, steerText.trim());
+    const ok = runRef.current?.control.steerAgent(agentId, steerText.trim()) ?? false;
     pushFeed(ok ? `manual steering delivered to ${agentId}` : `manual steering queued for ${agentId}'s next stage`, { agentId });
     setSteerText('');
   };
@@ -1099,8 +1102,8 @@ function CollaborateTab() {
           </Button>
           {running && (
             <>
-              <Button size="sm" variant="secondary" onClick={() => { runRef.current?.coordinator.requestPause(); setPaused(true); pushFeed('pause requested — agents pause at safe boundaries'); }}><Pause className="w-3.5 h-3.5 mr-1" /> Pause</Button>
-              <Button size="sm" variant="destructive" onClick={() => { runRef.current?.coordinator.requestStop(); pushFeed('stop requested'); }}><StopCircle className="w-3.5 h-3.5 mr-1" /> Stop</Button>
+              <Button size="sm" variant="secondary" onClick={() => { runRef.current?.control.requestPause(); setPaused(true); pushFeed('pause requested — agents pause at safe boundaries'); }}><Pause className="w-3.5 h-3.5 mr-1" /> Pause</Button>
+              <Button size="sm" variant="destructive" onClick={() => { runRef.current?.control.requestStop(); pushFeed('stop requested'); }}><StopCircle className="w-3.5 h-3.5 mr-1" /> Stop</Button>
             </>
           )}
         </div>
@@ -1122,7 +1125,7 @@ function CollaborateTab() {
                 {[...Object.keys(agents), 'coordinator'].map((id) => <SelectItem key={id} value={id}>{id}</SelectItem>)}
               </SelectContent>
             </Select>
-            <Button size="sm" variant="outline" className="h-7 text-[11px]" onClick={() => { if (steerText.trim()) { runRef.current?.coordinator.steerAll(steerText.trim()); pushFeed(`coordinator steering delivered to all agents`); setSteerText(''); } }}>
+            <Button size="sm" variant="outline" className="h-7 text-[11px]" onClick={() => { if (steerText.trim()) { runRef.current?.control.steerAll(steerText.trim()); pushFeed(`coordinator steering delivered to all agents`); setSteerText(''); } }}>
               <MessageSquarePlus className="w-3 h-3 mr-1" /> Coordinator
             </Button>
           </div>
@@ -1181,7 +1184,7 @@ function CollaborateTab() {
                 <div className="flex items-center gap-1.5">
                   <span className="text-[10px] text-yellow-600">turn limit reached on this stage</span>
                   <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={async () => {
-                    if (!runRef.current) return;
+                    if (!runRef.current?.coordinator) return;
                     pushFeed(`continuing ${r.stage} on the same machine with a fresh allowance…`);
                     const res = await runRef.current.coordinator.continueStage(r.stage as any);
                     if (res) pushFeed(`continuation of ${r.stage} finished (${res.turns} turns): ${res.summary.slice(0, 120)}`);
@@ -1194,7 +1197,7 @@ function CollaborateTab() {
                   <span className="text-[10px] text-muted-foreground">Reassign to:</span>
                   <Select onValueChange={async (peerId) => {
                     const target = participants.find((p) => p.machineId === peerId);
-                    if (!target || !runRef.current) return;
+                    if (!target || !runRef.current?.coordinator) return;
                     pushFeed(`reassigning ${r.stage} to ${target.machineName}…`);
                     const res = await runRef.current.coordinator.reassign(r.stage as any, {
                       machineId: target.machineId, machineName: target.machineName,

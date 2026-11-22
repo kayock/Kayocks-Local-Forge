@@ -129,6 +129,16 @@ export class FanoutRunner {
     this.activeRunners.get(key)?.steer(text);
   }
 
+  /** UI Pause: every ACTIVE agent pauses at its next safe boundary. */
+  pauseAll(): void {
+    for (const r of this.activeRunners.values()) r.requestPause();
+  }
+
+  /** UI steering broadcast to every active agent (delivered on their next turn). */
+  steerAll(text: string): void {
+    for (const r of this.activeRunners.values()) r.steer(text);
+  }
+
   /** Topological waves (dependency-aware scheduling). Unknown dependencies
    * degrade the task to a failed result instead of deadlocking. */
   waves(): string[][] {
