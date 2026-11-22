@@ -42,14 +42,39 @@ Rules:
 - When the task is complete, verify and then summarize: what you built, files touched, and how it was verified.
 `.trim();
 
-export function agentSystemPrompt(ctx: WorkspaceContext, mode: 'chat' | 'task'): string {
+// Cline-class working discipline: every significant action follows the
+// observe → reason → act → verify cycle, and nothing is claimed to work
+// without observed evidence.
+const ORAV_DISCIPLINE = [
+  'WORKING DISCIPLINE — observe → reason → act → verify:',
+  '- OBSERVE before acting: inspect the relevant files/paths for the current step; never act on assumptions about file contents or project state.',
+  '- REASON: decide the single next meaningful action that moves the task forward. Prefer the smallest change that can be verified.',
+  '- ACT: execute exactly one tool action per step and READ the actual result.',
+  '- VERIFY: if an edit fails, read the failure and fix the real cause before retrying (bounded: change approach after 2 failed attempts). If a build/test fails, read the actual error output and repair the code it points to. Never claim success because you ATTEMPTED an operation — verify it with a tool (read the file back, run the test, check the process status).',
+  '- If a command times out, distinguish a timeout from a broken application (check process status / logs). If a process keeps running, report it as running — do not pretend it exited.',
+  '- Finish only when every requirement has observed evidence; otherwise finish honestly with PARTIAL/BLOCKED and what remains.',
+].join('\n');
+
+// Plan mode (Cline Plan/Act): investigate and propose — never mutate.
+export const PLAN_MODE_ADDON = [
+  'PLAN MODE — read-only investigation and planning:',
+  '- You MUST NOT modify files, create/delete paths, install anything, or start/stop processes. Write tools are disabled for this run.',
+  '- Investigate first: map the relevant directories, read the involved files, search symbols/usages, inspect configuration and package manifests.',
+  '- Identify existing implementations BEFORE proposing new ones; note the project conventions you observed.',
+  '- Then produce a structured implementation plan: numbered steps, exact files to create/modify (paths), what each change does, risks/edge cases, and the EXACT verification command for each step (test/build to run afterwards).',
+  '- State open questions and assumptions explicitly. The user reviews and approves the plan before Act mode executes it.',
+].join('\n');
+
+export function agentSystemPrompt(ctx: WorkspaceContext, mode: 'chat' | 'task', devMode?: 'plan' | 'act'): string {
   return [
     `You are the LocalForge coding agent operating directly inside the user's authorized workspace on their machine. ${workspaceBlock(ctx)}`,
     mode === 'task'
       ? 'Complete the user task autonomously end to end. Use the provided tools for every file and command operation.'
       : 'Help with the user request. Use the provided tools when action is needed; answer questions concisely.',
+    ORAV_DISCIPLINE,
+    devMode === 'plan' ? PLAN_MODE_ADDON : '',
     AGENT_RULES,
-  ].join('\n\n');
+  ].filter(Boolean).join('\n\n');
 }
 
 export function fallbackSystemAddon(): string {

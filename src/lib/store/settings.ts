@@ -33,6 +33,8 @@ interface SettingsState {
   // agent turn budget per run (spec §3.8: configurable, not a hard wall —
   // "Continue task" resumes past it with full context preserved)
   agentTurns: number;
+  // Cline-style Plan/Act working mode (persisted)
+  agentDevMode: 'plan' | 'act';
   // learned protocol per provider/model profile (spec §3.2): e.g. when an
   // auto-mode run falls back, the reason is recorded and the effective mode
   // persists for that model instead of re-probing every run.
@@ -62,6 +64,7 @@ interface SettingsState {
   setPolicy: (p: PolicyMode) => void;
   setToolProtocol: (p: ProtocolSetting) => void;
   setAgentTurns: (n: number) => void;
+  setAgentDevMode: (m: 'plan' | 'act') => void;
   recordModelProtocol: (providerBaseUrl: string, model: string, mode: ToolProtocolMode, reason: string) => void;
   effectiveProtocol: (providerBaseUrl: string | undefined, model: string) => ProtocolSetting;
   recordModelDialect: (providerBaseUrl: string, model: string, dialect: 'native' | 'json' | 'tagged' | 'py') => void;
@@ -92,6 +95,7 @@ export const useSettings = create<SettingsState>()(
       policy: 'confirm-commands',
       toolProtocol: 'auto',
       agentTurns: 40,
+    agentDevMode: 'act',
       modelProtocols: {},
       modelDialects: {},
       pipelineModels: {},
@@ -117,6 +121,7 @@ export const useSettings = create<SettingsState>()(
       setInference: (patch) => set((s) => ({ inference: { ...s.inference, ...patch } })),
       setPolicy: (p) => set({ policy: p }),
       setToolProtocol: (p) => set({ toolProtocol: p }),
+      setAgentDevMode: (m) => set({ agentDevMode: m }),
       setAgentTurns: (n) => set({ agentTurns: Math.max(5, Math.min(500, Math.round(Number(n) || 40))) }),
       recordModelProtocol: (baseUrl, model, mode, reason) =>
         set((s) => {

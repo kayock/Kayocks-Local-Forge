@@ -84,6 +84,9 @@ export interface RunnerConfig {
   // ---- Forge upgrade (Problems A/C/D/E, Part 2) ----
   // canonical workspace identity surfaced to tools and tool feedback
   workspaceMeta?: { id: string; rootPath: string; machineLabel: string; platform: string; projectName?: string; knownTree?: string };
+  // Cline-style Plan/Act: 'plan' strips mutating tools and switches the
+  // system prompt to read-only investigation + planning.
+  devMode?: 'plan' | 'act';
   // coordinator-owned contract; when present, finish passes through the
   // completion gate instead of being accepted on the model's word
   contract?: TaskContract;
@@ -126,6 +129,9 @@ const REPEAT_LIMIT_FAILED = 3;    // identical failing calls get one extra retry
 // Escalation (Problem A): after this many BLOCKED attempts of the same
 // signature with an unchanged workspace, the coordinator escalates.
 const REPEAT_EXEMPT = new Set(['finish']);
+// Plan mode (Cline Plan/Act): mutating tools are removed from the run and
+// hard-blocked at execution time (defense in depth).
+const PLAN_BLOCKED = new Set(['write_file', 'edit_file', 'append_file', 'create_dir', 'delete_path', 'extract_archive', 'install_dependencies', 'launch_app', 'stop_process']);
 // After the recovery ladder is exhausted, this many further NO-PROGRESS
 // turns (blocked calls or pure activity) trigger the honest stop. A genuine
 // write/edit resets the counter — the model keeps its finish window.
@@ -202,6 +208,12 @@ export class AgentRunner {
   private sentEnvelopes = new Set<string>();
   // Milestone 1: cumulative token usage for the run (from usage events)
   private usageTotal: { promptTokens: number | null; completionTokens: number | null } = { promptTokens: null, completionTokens: null };
+
+  /** Plan mode removes mutating tools from the run entirely. */
+  private toolsForRun(): ToolDef[] {
+    if (this.cfg.devMode !== 'plan') return this.cfg.tools;
+    return this.cfg.tools.filter((t) => !PLAN_BLOCKED.has(t.name));
+  }
 
   constructor(private cfg: RunnerConfig) {
     this.protocol = normalizeProtocolMode(cfg.toolProtocol);
@@ -463,7 +475,14 @@ export class AgentRunner {
     }
 
     // unknown tool → exact repair information
-    const def = this.cfg.tools.find((t) => t.name === name);
+    const def = this.toolsForRun().find((t) => t.name === name);
+    if (!def && this.cfg.devMode === 'plan' && PLAN_BLOCKED.has(name)) {
+      entry.status = 'error';
+      finishArgs();
+      entry.output = `Plan mode: "${name}" is disabled — this run is read-only. Investigate and produce the plan; the user approves execution in Act mode.`;
+      this.emit({ type: 'tool_end', call: { id: callId, name, args }, entry });
+      return { entry, args, name };
+    }
     if (!def) {
       entry.status = 'error';
       finishArgs();
@@ -835,7 +854,7 @@ export class AgentRunner {
   }
 
   private wireTools() {
-    return this.cfg.tools.map((t) => ({
+    return this.toolsForRun().map((t) => ({
       type: 'function' as const,
       function: {
         name: t.name,

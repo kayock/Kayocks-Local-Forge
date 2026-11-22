@@ -495,7 +495,7 @@ export function IdeView() {
 
       // Problem C: the contract block leads every non-chat system prompt —
       // requirements survive compaction because the block is re-sent each run.
-      const basePrompt = agentSystemPrompt(wsCtx, agentMode === 'chat' ? 'chat' : 'task');
+      const basePrompt = agentSystemPrompt(wsCtx, agentMode === 'chat' ? 'chat' : 'task', settings.agentDevMode);
       const systemPrompt = contract ? `${contractPromptBlock(contract, { role: agentMode === 'pipeline' ? 'pipeline stage' : 'task agent' })}\n\n=== RUNTIME ===\n${basePrompt}` : basePrompt;
       if (contract) persistContract(contract);
 
@@ -526,6 +526,7 @@ export function IdeView() {
           provider: activeProviderCfg,
           model: settings.model,
           params: resolveInferenceParams(settings.inference),
+          devMode: settings.agentDevMode,
           systemPrompt,
           task: resumeMessages ? 'Continue the task from exactly where you left off. Do not redo work that already succeeded; verify remaining work, then call finish.' : task,
           contextMessages: resumeMessages,

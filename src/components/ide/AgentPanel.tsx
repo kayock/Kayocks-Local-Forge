@@ -141,7 +141,7 @@ export function AgentPanel({
   setMode: (m: 'chat' | 'task' | 'pipeline') => void;
 }) {
   const { messages, pendingApproval, running, currentStage, toolLog, lastSession, contract, lastCompletion } = useAgent();
-  const settings = useSettings();
+  const settings = useSettings(); // includes agentDevMode + setAgentDevMode (persisted)
   const [input, setInput] = useState('');
   const [showContract, setShowContract] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -189,6 +189,12 @@ export function AgentPanel({
           </Tabs>
         </div>
         <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <Tabs value={settings.agentDevMode} onValueChange={(v) => settings.setAgentDevMode(v as 'plan' | 'act')}>
+            <TabsList className="h-5 p-0.5 bg-muted">
+              <TabsTrigger value="plan" className="h-4 text-[10px] px-1.5 py-0" title="Plan mode: read-only investigation, structured plan, no file changes">Plan</TabsTrigger>
+              <TabsTrigger value="act" className="h-4 text-[10px] px-1.5 py-0" title="Act mode: execute with edits, commands and verification">Act</TabsTrigger>
+            </TabsList>
+          </Tabs>
           <span className="font-mono truncate">{modelReady ? `${activeProvider!.label || activeProvider!.baseUrl} · ${settings.model}` : 'No model selected'}</span>
           {mode === 'pipeline' && currentStage && (
             <Badge variant="outline" className="text-[10px] lf-pulse-dot">{currentStage} running</Badge>
