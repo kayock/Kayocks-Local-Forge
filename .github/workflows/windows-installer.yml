@@ -175,20 +175,52 @@ jobs:
         run: |
           sha256sum -c SHA256SUMS.txt || { echo "FAIL: artifact hash mismatch"; exit 1; }
 
-      - name: Silent-install the exact installer artifact
+      - name: Silent-install the exact installer artifact (native Windows; bounded)
         working-directory: download/windows
+        shell: pwsh
+        timeout-minutes: 7
         run: |
-          SETUP=$(ls LocalForge-Companion-Setup-*.exe | head -1)
-          echo "Installing $SETUP (unsigned RC candidate) silently…"
-          "./$SETUP" /S
-          for i in $(seq 1 60); do
-            test -f "$LOCALAPPDATA/Programs/LocalForge Companion/LocalForgeCompanion/localforge-companion.exe" && break
-            sleep 1
-          done
-          test -f "$LOCALAPPDATA/Programs/LocalForge Companion/LocalForgeCompanion/localforge-companion.exe" || {
-            echo "FAIL: silent installation did not produce the installed companion exe"; exit 1;
+          # Invoke NSIS from native PowerShell, not Git Bash: MSYS path conversion
+          # can rewrite the case-sensitive /S NSIS silent flag into a path.
+          $ErrorActionPreference = 'Stop'
+          $setup = Get-ChildItem -File -Filter 'LocalForge-Companion-Setup-*.exe' | Select-Object -First 1
+          if (-not $setup) { throw 'Installer artifact is missing.' }
+          $installedExe = Join-Path $env:LOCALAPPDATA 'Programs\LocalForge Companion\LocalForgeCompanion\localforge-companion.exe'
+          $diagFile = Join-Path $PWD 'silent-install-diagnostics.log'
+          "Setup: $($setup.FullName)" | Set-Content -LiteralPath $diagFile
+          "Expected installed exe: $installedExe" | Add-Content -LiteralPath $diagFile
+          "Silent NSIS argument: /S (passed unchanged from PowerShell)" | Add-Content -LiteralPath $diagFile
+          Write-Host "Installing $($setup.Name) via native Windows PowerShell /S (max 4 minutes)"
+          $proc = Start-Process -FilePath $setup.FullName -ArgumentList '/S' -PassThru -NoNewWindow
+          "Installer PID: $($proc.Id)" | Add-Content -LiteralPath $diagFile
+          if (-not $proc.WaitForExit(240000)) {
+            "INSTALL TIMEOUT: installer still running after 240 seconds" | Add-Content -LiteralPath $diagFile
+            (Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'LocalForge|Setup|makensis|nsis' } |
+              Select-Object Name,ProcessId,ParentProcessId,CommandLine | Format-List | Out-String) |
+              Add-Content -LiteralPath $diagFile
+            try { & taskkill.exe /PID $proc.Id /T /F | Out-String | Add-Content -LiteralPath $diagFile } catch {}
+            throw "Silent NSIS installation hung for 4 minutes; see $diagFile"
           }
-          echo "LF_ARTIFACT_DIR=$PWD" >> "$GITHUB_ENV"
+          "Installer exit code: $($proc.ExitCode)" | Add-Content -LiteralPath $diagFile
+          if ($proc.ExitCode -ne 0) { throw "NSIS installer failed with exit code $($proc.ExitCode)" }
+          $installed = $false
+          for ($i = 0; $i -lt 60; $i++) {
+            if (Test-Path -LiteralPath $installedExe -PathType Leaf) { $installed = $true; break }
+            Start-Sleep -Seconds 1
+          }
+          if (-not $installed) {
+            "Installer returned successfully but expected executable is absent" | Add-Content -LiteralPath $diagFile
+            $root = Join-Path $env:LOCALAPPDATA 'Programs\LocalForge Companion'
+            if (Test-Path -LiteralPath $root) {
+              (Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue |
+                Select-Object -First 40 -ExpandProperty FullName | Out-String) |
+                Add-Content -LiteralPath $diagFile
+            }
+            throw "Silent installation did not produce $installedExe; see $diagFile"
+          }
+          "PASS: installed executable exists" | Add-Content -LiteralPath $diagFile
+          Write-Host "PASS: installed $installedExe"
+          "LF_ARTIFACT_DIR=$($PWD.Path)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Verify the INSTALLED product (files, shortcuts, native PTY, real PowerShell session, uninstall)
         run: |
@@ -201,6 +233,7 @@ jobs:
         with:
           name: installed-verification-diagnostics
           path: |
+            download/windows/silent-install-diagnostics.log
             installed-verification.log
             download/windows/installed-companion.log
             companion/npm-install.log
