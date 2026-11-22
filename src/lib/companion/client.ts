@@ -127,7 +127,7 @@ export class CompanionClient {
     resources?: { cpus: number; load1: number; memTotal: number; memFree: number; uptimeSec: number; hostname: string };
   }> {
     const res = await fetch(this.buildUrl('/health'));
-    if (!res.ok) throw new CompanionError(`Companion health check failed (${res.status})`);
+    if (!res.ok) throw new CompanionError(`Companion health check failed (${res.status}) at ${this.buildUrl('/health')}`);
     return res.json();
   }
 

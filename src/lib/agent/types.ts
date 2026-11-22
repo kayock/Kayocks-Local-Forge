@@ -154,7 +154,10 @@ export interface ToolLogEntry {
   outcome?: 'ok-empty' | 'ok-nonempty' | 'error' | 'denied' | 'blocked';
   // Diagnostics detail (Phase 1.5 §6): optional per-call annotations. Present
   // when the runner records them; the diagnostics panel renders '—' otherwise.
-  parse?: 'ok' | 'repair' | 'failed';
+  // Milestone 4 (transport): how the call's arguments arrived — 'object' |
+  // 'clean' | 'repaired' | 'truncated' | 'failed' ('ok'/'repair' kept for the
+  // legacy diagnostics panel labels).
+  parse?: 'ok' | 'repair' | 'failed' | 'object' | 'clean' | 'repaired' | 'truncated';
   validation?: 'ok' | 'schema-invalid' | 'unknown-tool';
   durMs?: number;
   repeatBlocked?: boolean;

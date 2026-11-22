@@ -55,6 +55,7 @@ const TOOL_ALIASES: Record<string, string> = {
   cat: 'read_file', open_file: 'read_file', view_file: 'read_file', view: 'read_file',
   write: 'write_file', create_file: 'write_file', save_file: 'write_file', save: 'write_file',
   edit: 'edit_file', replace_in_file: 'edit_file', str_replace_editor: 'edit_file', apply_patch: 'edit_file', patch_file: 'edit_file',
+  append: 'append_file', append_to_file: 'append_file', add_to_file: 'append_file',
   mkdir: 'create_dir', make_dir: 'create_dir',
   rm: 'delete_path', remove: 'delete_path', remove_path: 'delete_path', delete_file: 'delete_path',
   grep: 'search_project', search: 'search_project', search_files: 'search_project', find_in_files: 'search_project',
@@ -72,6 +73,8 @@ const TOOL_ALIASES: Record<string, string> = {
 
 // Per-parameter aliases. Applied AFTER tool-name resolution; e.g. a model that
 // calls edit_file with {path, old_content, new_content} still succeeds.
+const Buffer_is = (s: string) => `${new TextEncoder().encode(s).length} bytes`;
+
 const PATH_ALIASES = ['file', 'filepath', 'file_path', 'filename', 'file_name', 'target', 'dir', 'directory', 'folder'];
 const COMMAND_ALIASES = ['cmd', 'commandline', 'command_line', 'shell_command', 'shell', 'script'];
 
@@ -88,6 +91,9 @@ function paramAliases(tool: string, param: string): string[] {
       if (param === 'find') return ['old_content', 'old_text', 'old_string', 'old', 'search', 'original', 'needle', 'target_text'];
       if (param === 'replace') return ['new_content', 'new_text', 'new_string', 'new', 'replacement', 'updated', 'replace_with'];
       if (param === 'replaceAll') return ['replace_all', 'all'];
+      break;
+    case 'append_file':
+      if (param === 'content') return ['text', 'body', 'addition'];
       break;
     case 'write_file':
     case 'read_file':
@@ -158,7 +164,7 @@ export function validateToolArgs(tool: string, args: Record<string, any>): strin
     return `Unknown tool "${tool}". Available tools: ${CORE_TOOLS.map((t) => t.name).join(', ')}. Reply again with one of these exact names.`;
   }
   if (args._raw !== undefined) {
-    return `The "args" for ${tool} were not valid JSON and could not be parsed: ${cap(String(args._raw), 200)}. Send args as a JSON object, e.g. {"${def.params[0]?.name ?? 'path'}": "..."}.`;
+    return `The "args" for ${tool} were not valid JSON and could not be parsed: ${cap(String(args._raw), 200)}. The call was NOT executed. No files were changed. Send args as a JSON object, e.g. {"${def.params[0]?.name ?? 'path'}": "..."}.`;
   }
   const missing = def.params.filter((p) => p.required && (args[p.name] === undefined || String(args[p.name] ?? '').trim() === ''));
   if (missing.length) {
@@ -353,7 +359,7 @@ export const CORE_TOOLS: ToolDef[] = [
         const r = await ctx.fs.writeFile(p, content, { ifUnmodifiedSince: mtime });
         const stat = r.created ? 'created' : `updated (+${r.diffAdded ?? '?'} / -${r.diffRemoved ?? '?'} lines)`;
         return {
-          output: `Wrote ${p} (${r.bytes} bytes, ${stat}).`,
+          output: `Wrote ${p} (${r.bytes} bytes). ${stat}`,
           diff,
           diffPath: p,
           changedFile: p,
@@ -427,6 +433,33 @@ export const CORE_TOOLS: ToolDef[] = [
         }
         throw e;
       }
+    },
+  },
+  {
+    name: 'append_file',
+    description: 'Append text to a file (created if missing). Use to build large files in sections instead of one huge write_file.',
+    danger: 'safe',
+    params: [
+      { name: 'path', type: 'string', description: 'File path relative to workspace root', required: true, aliases: ['file', 'filename', 'target'] },
+      { name: 'content', type: 'string', description: 'Text to append at the end of the file', required: true, aliases: ['text', 'body', 'addition'] },
+    ],
+    async run(args, ctx) {
+      const p = canonRelPath(args.path);
+      const content = typeof args.content === 'string' ? args.content : String(args.content ?? '');
+      ctx.assertEditable?.(p);
+      let existing = '';
+      try {
+        const f = await ctx.fs.readFile(p);
+        existing = f.content;
+        if (existing && !existing.endsWith('\n') && !content.startsWith('\n')) existing += '\n';
+      } catch (e: any) {
+        const msg = summarizeError(e);
+        if (!/not found|404|ENOENT/i.test(msg)) return { output: `Error reading ${p}: ${msg}`, isError: true };
+        existing = ''; // new file
+      }
+      const next = existing + content;
+      const r = await ctx.fs.writeFile(p, next, { ifUnmodifiedSince: null });
+      return { output: `Appended to ${p} (+${Buffer_is(content)}; ${next.length} bytes total).`, changedFile: p };
     },
   },
   {

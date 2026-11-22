@@ -64,11 +64,14 @@ export class RecoveryCoordinator {
   private autoFired = new Set<AutoSteeringTrigger>();
   // automatic steering queue: delivered AFTER manual steering, never dropped
   private autoQueue: { trigger: AutoSteeringTrigger; text: string }[] = [];
+  private autoPendingBoundaries = 0;
   // consecutive schema-invalid calls (streak detection)
   private invalidStreak = 0;
   // consecutive turns without measurable progress (progress stall)
   private noProgressTurns = 0;
   private lastWriteTurn = 0;
+  private turnsAfterExhausted = 0;
+  private stallPending = false;
 
   constructor(private deps: RecoveryDeps) {}
 
@@ -85,22 +88,38 @@ export class RecoveryCoordinator {
     this.deps.onEvent({ kind: 'auto_steering', trigger, message: text });
   }
 
+  /** Boundaries the pending automatic notes have waited undelivered. */
+  autoPendingSince(): number {
+    return this.autoPendingBoundaries;
+  }
+
+  /** Called once per turn boundary while automatic notes remain queued. */
+  tickAutoPending(): void {
+    if (this.autoQueue.length) this.autoPendingBoundaries++;
+    else this.autoPendingBoundaries = 0;
+  }
+
   /** Drain the automatic queue for delivery at a safe boundary. Manual
    * steering is consumed by the runner FIRST; automatic waits its turn. */
   drainAutoSteering(): { trigger: AutoSteeringTrigger; text: string }[] {
     const out = this.autoQueue.splice(0, this.autoQueue.length);
+    this.autoPendingBoundaries = 0;
     return out;
   }
 
   // ---- streak tracking (validation failures) ----
-  noteInvalidCall(tool: string, error: string): void {
+  noteInvalidCall(tool: string, error: string, opts?: { truncated?: boolean }): string | null {
     this.invalidStreak++;
-    if (this.invalidStreak >= STREAK_RECOVERY_THRESHOLD) {
-      this.invalidStreak = 0;
-      this.deps.onEvent({
-        kind: 'streak_recovery',
-        message: `${STREAK_RECOVERY_THRESHOLD} consecutive invalid ${tool} calls — recovery guidance issued.`,
-      });
+    if (this.invalidStreak < STREAK_RECOVERY_THRESHOLD) return null;
+    this.invalidStreak = 0;
+    const truncated = !!opts?.truncated;
+    this.deps.onEvent({
+      kind: 'streak_recovery',
+      message: `${STREAK_RECOVERY_THRESHOLD} consecutive ${truncated ? 'truncated' : 'invalid'} ${tool} calls — recovery guidance issued.`,
+    });
+    if (!truncated) {
+      // genuine validation failures escalate; truncated payloads already have
+      // their own trigger (truncated-edit) — firing both would double-guide.
       this.deps.onEscalation?.({
         kind: 'repeated-failure',
         message: `${tool} calls keep failing schema validation (${error.slice(0, 160)}) — recovery guidance issued and coordinator informed.`,
@@ -113,6 +132,14 @@ export class RecoveryCoordinator {
         ].join('\n'));
       }
     }
+    return [
+      '[RECOVERY — repeated failure pattern detected]',
+      `Three consecutive ${tool} calls failed ${truncated ? 'with truncated payloads' : 'argument validation'}.`,
+      'Do not re-send the same payload. Alternatives:',
+      '  • Use edit_file with SHORT find/replace snippets instead of one huge write.',
+      '  • Build large files with several append_file calls.',
+      '  • Re-read the exact tool schema and re-issue the COMPLETE call.',
+    ].join('\n');
   }
 
   noteValidCall(): void {
@@ -124,9 +151,16 @@ export class RecoveryCoordinator {
     if (withProgress) {
       this.noProgressTurns = 0;
       this.lastWriteTurn = turn;
+      this.postExhaustionProgress();
     } else {
       this.noProgressTurns++;
     }
+  }
+
+  /** A real write/edit after exhaustion earns back the finish window. */
+  postExhaustionProgress(): void {
+    this.turnsAfterExhausted = 0;
+    this.stallPending = false;
   }
 
   classify(): StallClass | null {
@@ -158,7 +192,7 @@ export class RecoveryCoordinator {
     const header = `[COORDINATOR RECOVERY — ACTIVE RECOVERY ${next}/2 — ${action} — stall class: ${stallClass}]`;
     const body: string[] = [
       header,
-      `You are looping on ${ctx.tool} without the workspace changing. The coordinator has taken over for one recovery step.`,
+      `Recovery step ${next} (${action}): you are looping on ${ctx.tool} without the workspace changing. The coordinator has taken over for this step.`,
     ];
     if (next === 1) {
       body.push(

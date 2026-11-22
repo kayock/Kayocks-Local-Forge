@@ -126,6 +126,10 @@ const REPEAT_LIMIT_FAILED = 3;    // identical failing calls get one extra retry
 // Escalation (Problem A): after this many BLOCKED attempts of the same
 // signature with an unchanged workspace, the coordinator escalates.
 const REPEAT_EXEMPT = new Set(['finish']);
+// After the recovery ladder is exhausted, this many further NO-PROGRESS
+// turns (blocked calls or pure activity) trigger the honest stop. A genuine
+// write/edit resets the counter — the model keeps its finish window.
+const STALL_STOP_AFTER_NO_PROGRESS = 4;
 // Tools whose success changes workspace state (drives the workspace version
 // used to distinguish pointless repetition from legitimate re-runs).
 const FS_WRITERS = new Set(['write_file', 'edit_file', 'create_dir', 'delete_path', 'extract_archive']);
@@ -187,6 +191,15 @@ export class AgentRunner {
   private recovery: RecoveryCoordinator;
   private stallStop: { tool: string; sig: string; stallClass: StallClass } | null = null;
   private lastStallClass: StallClass = 'repetition';
+  // Milestone 4 (refined): after the ladder exhausts, the model still gets a
+  // finish window — the honest stop fires only after repeated further blocks,
+  // or at the turn limit without completion (stallPending).
+  private exhaustedNotified = new Set<string>();
+  private turnsAfterExhausted = 0;
+  private stallPending = false;
+  private lastBoundaryHadManual = false;
+  private boundariesSinceManual = 99;
+  private sentEnvelopes = new Set<string>();
   // Milestone 1: cumulative token usage for the run (from usage events)
   private usageTotal: { promptTokens: number | null; completionTokens: number | null } = { promptTokens: null, completionTokens: null };
 
@@ -405,12 +418,16 @@ export class AgentRunner {
         entry.argsError = parsed.error ?? 'truncated tool-call arguments';
         entry.status = 'error';
         entry.validation = parsed.truncated ? 'schema-invalid' : undefined;
+        entry.parse = parsed.truncated ? 'truncated' : 'failed';
         entry.output = [
-          `Error: tool-call arguments could not be parsed${parsed.truncated ? ' — the call looks TRUNCATED (cut off mid-JSON) and was NOT applied' : ''}.`,
+          `Error: tool-call arguments could not be parsed${parsed.truncated ? ' — the call looks TRUNCATED (cut off mid-JSON)' : ''}. The call was NOT executed. No files were changed by this call.`,
           parsed.error ? `Parse failure: ${parsed.error}` : '',
           parsed.rawPreview ? `Received (capped): ${parsed.rawPreview.slice(0, 400)}` : '',
-          'Re-issue the COMPLETE call with valid JSON arguments. For very large files, build them with several append_file calls instead of one huge write_file.',
+          'Re-issue the COMPLETE call with valid JSON arguments. For very large files, build them with several append_file calls instead of one huge write_file, or use edit_file with SHORT find/replace snippets.',
         ].filter(Boolean).join('\n');
+        // failure-pattern recovery guidance on the entry itself (spec §3):
+        const guidance = this.recovery.noteInvalidCall(name, entry.argsError, { truncated: true });
+        if (guidance) { entry.output += `\n${guidance}`; entry.recoveryIssued = true; }
         finishArgs();
         this.emit({ type: 'tool_end', call: { id: callId, name, args: entry.args }, entry });
         if (parsed.truncated && ['write_file', 'edit_file', 'append_file'].includes(name)) {
@@ -420,15 +437,29 @@ export class AgentRunner {
             'Prefer small, targeted edits: use edit_file for in-place changes and append_file to build large files in sections. Keep every single tool call small enough to finish.',
           ].join('\n'));
         }
-        this.recovery.noteInvalidCall(name, entry.argsError);
         return { entry, args: entry.args, name };
       }
     }
 
-    const { args, aliasesApplied } = normalizeToolArgs(rawName, rawArgs);
+    // clean/repaired string payloads: use the PARSED args (normalizeToolArgs
+    // would otherwise fail its own JSON.parse on damaged-but-repairable args).
+    let parseNote = '';
+    let parseFrom: 'object' | 'clean' | 'repaired' | 'truncated' | 'failed' = 'object';
+    let normalizedRaw: unknown = rawArgs;
+    if (typeof rawArgs === 'string') {
+      const parsed = parseToolCallArgs(rawArgs);
+      parseFrom = parsed.from === 'raw' ? 'failed' : parsed.from;
+      normalizedRaw = parsed.args ?? rawArgs;
+      if (parsed.repairs?.length) {
+        parseNote = `Note: arguments needed serialization repair (${parsed.repairs.slice(0, 3).join('; ')}) — the repaired payload was executed.`;
+      }
+    }
+    const { args, aliasesApplied } = normalizeToolArgs(rawName, normalizedRaw);
     entry.args = args;
+    entry.parse = parseFrom;
+    if (parseNote) entry.output = parseNote;
     if (aliasesApplied && Object.keys(aliasesApplied).length) {
-      entry.output = `Note: argument aliases normalized: ${Object.entries(aliasesApplied).map(([a, b]) => `${a} → ${b}`).join(', ')}.`;
+      entry.output = `${entry.output ? entry.output + '\n' : ''}Note: argument aliases normalized: ${Object.entries(aliasesApplied).map(([a, b]) => `${a} → ${b}`).join(', ')}.`;
     }
 
     // unknown tool → exact repair information
@@ -446,8 +477,9 @@ export class AgentRunner {
       entry.status = 'error';
       entry.validation = 'schema-invalid';
       finishArgs();
-      entry.output = invalid;
-      this.recovery.noteInvalidCall(name, invalid);
+      const guidance = this.recovery.noteInvalidCall(name, invalid);
+      entry.output = guidance ? `${invalid}\n${guidance}` : invalid;
+      if (guidance) entry.recoveryIssued = true;
       return { entry, args, name };
     }
 
@@ -515,13 +547,18 @@ export class AgentRunner {
             });
           }
         } else {
-          // ladder exhausted for this run → stop honestly instead of looping
-          this.stallStop = { tool: name, sig, stallClass };
-          this.messages.push({ role: 'user', content: [
-            `[COORDINATOR — RECOVERY EXHAUSTED]`,
-            `The ${name} call was blocked again after two recovery steps (${this.lastStallClass} stall). The coordinator is stopping this run instead of burning more turns on a loop.`,
-            `All progress, tool results and the full task contract are preserved. Resume options: press "Continue task" with new steering, or switch models in Settings and continue.`,
-          ].join('\n') });
+          // ladder exhausted: give the model ONE final envelope per signature
+          // and keep the run alive briefly so it can still call finish —
+          // the honest stop fires after repeated further blocks.
+          if (!this.exhaustedNotified.has(sig)) {
+            this.exhaustedNotified.add(sig);
+            this.stallPending = true;
+            this.messages.push({ role: 'user', content: [
+              `[COORDINATOR — RECOVERY EXHAUSTED]`,
+              `The ${name} call was blocked again after two recovery steps (${this.lastStallClass} stall).`,
+              `This is the final coordinator intervention: call finish now with an honest summary of what was completed, what remains open, and which requirements are unmet (status PARTIAL/BLOCKED). Do not repeat the blocked call.`,
+            ].join('\n') });
+          }
         }
         return { entry, args, name };
       }
@@ -670,8 +707,15 @@ export class AgentRunner {
       this.messages.push({ role: 'user', content: env.text });
       return false;
     }
-    this.stallStop = { tool: 'activity without progress', sig, stallClass: cls };
-    return true;
+    // Ladder consumed: count no-progress turns; the honest stop fires after a
+    // bounded finish window (a real write resets it — see noteTurn).
+    this.turnsAfterExhausted++;
+    if (this.turnsAfterExhausted >= STALL_STOP_AFTER_NO_PROGRESS) {
+      this.stallStop = { tool: 'no-progress turns after exhausted recovery', sig, stallClass: cls };
+      return true;
+    }
+    this.stallPending = true;
+    return false;
   }
 
   // Milestone 4: the honest stalled verdict. The run stops instead of
@@ -694,6 +738,8 @@ export class AgentRunner {
       this.cfg.onContractUpdate?.(contract);
     }
     this.recovery.noteTurn(true, 0); // reset pressure for the resumed run
+    this.recovery.postExhaustionProgress();
+    this.exhaustedNotified.clear();
     this.emit({ type: 'stalled', message: note.split('\n')[0] });
     this.stallStop = null;
     return { content: '', note };
@@ -702,6 +748,12 @@ export class AgentRunner {
   private async runOneCall(call: { id: string; name: string; args?: unknown }, messageId: string | null): Promise<{ finished: boolean; finalContent: string; entry: ToolLogEntry; name: string }> {
     this.emit({ type: 'tool_start', call: { id: call.id, name: canonicalToolName(call.name), args: normalizeToolArgs(call.name, call.args).args } });
     const { entry, args, name } = await this.executeCall(call.name, call.args, call.id);
+    // Transport protection (spec §1): a huge/truncated raw payload must not be
+    // re-sent to the model in every later turn — cap it in the HISTORY (the
+    // tool entry keeps the diagnostic preview).
+    if ((entry.parse === 'truncated' || entry.parse === 'failed') && typeof call.args === 'string' && call.args.length > 800) {
+      call.args = { _raw: `${call.args.slice(0, 500)}…[${call.args.length} chars — capped in history; the call was NOT executed]` };
+    }
     this.emit({ type: 'tool_end', call: { id: call.id, name, args }, entry });
     if (messageId === 'wire') {
       this.messages.push({ role: 'tool', toolCallId: call.id || name, name, content: capOutput(entry.output || '') });
@@ -718,7 +770,19 @@ export class AgentRunner {
   }
 
   private toWire(): any[] {
+    // Context protection + envelope dedup: each coordinator recovery envelope
+    // is delivered to the model in EXACTLY ONE payload (the turn it was
+    // injected for). Later payloads carry a short marker instead — the
+    // guidance was already delivered; re-sending copies would bloat every
+    // subsequent turn without adding information.
+    const sentEnvelopes = this.sentEnvelopes;
     const wire = this.messages.map((m) => {
+      if (m.role === 'user' && typeof m.content === 'string' && (m.content.startsWith('[COORDINATOR RECOVERY') || m.content.startsWith('[COORDINATOR — RECOVERY EXHAUSTED]'))) {
+        if (sentEnvelopes.has(m.content)) {
+          return { role: 'user', content: '[Coordinator recovery guidance was delivered earlier — follow it. Do not repeat the blocked call.]' };
+        }
+        sentEnvelopes.add(m.content);
+      }
       if (m.role === 'assistant' && m.toolCalls?.length) {
         return {
           role: 'assistant',
@@ -861,21 +925,36 @@ export class AgentRunner {
 
       // Problem A: drain user steering FIRST — applied promptly, never lost
       // behind retries or blocks.
+      this.lastBoundaryHadManual = false;
+      this.boundariesSinceManual++;
       if (this.steeringQueue.length) {
         const notes = this.steeringQueue.splice(0, this.steeringQueue.length);
+        this.lastBoundaryHadManual = true;
+        this.boundariesSinceManual = 0;
         this.messages.push({
           role: 'user',
-          content: `[USER STEERING — HIGHEST PRIORITY, applies immediately]\n${notes.map((n) => `- ${n}`).join('\n')}\nAcknowledge briefly and follow it now; it overrides earlier instructions and the current approach.`,
+          content: `[USER STEERING]\n(Highest priority — applies immediately)\n${notes.map((n) => `- ${n}`).join('\n')}\nAcknowledge briefly and follow it now; it overrides earlier instructions and the current approach.`,
         });
         this.emit({ type: 'steering_applied', message: `User steering applied: ${notes.map((n) => n.slice(0, 80)).join(' | ')}` });
       }
-      // Milestone 4: automatic steering arrives AFTER manual steering at the
-      // same boundary — never interleaved, never discarded.
-      const autoNotes = this.recovery.drainAutoSteering();
-      if (autoNotes.length) {
-        for (const a of autoNotes) {
-          this.messages.push({ role: 'user', content: `[AUTOMATIC STEERING]\n${a.text}\nAcknowledge briefly and adjust your approach now.` });
-          this.emit({ type: 'steering_applied', message: `Automatic steering delivered (${a.trigger}).` });
+      // Milestone 4: automatic steering arrives AFTER manual steering —
+      // never interleaved in the same boundary, never discarded. Manual
+      // delivery this turn defers the automatic queue to the next boundary.
+      // Deliver automatic notes only at a boundary WITHOUT fresh manual
+      // steering, or once they have waited at least one full boundary.
+      this.recovery.tickAutoPending();
+      // Automatic guidance waits for a clean boundary: it goes out only when
+      // NO manual steering was delivered here and at least one boundary has
+      // passed since the last manual delivery (manual always wins priority).
+      const manualJustDelivered = this.lastBoundaryHadManual;
+      this.lastBoundaryHadManual = false;
+      if (!manualJustDelivered && this.boundariesSinceManual >= 2) {
+        const autoNotes = this.recovery.drainAutoSteering();
+        if (autoNotes.length) {
+          for (const a of autoNotes) {
+            this.messages.push({ role: 'user', content: `[AUTOMATIC STEERING]\n${a.text}\nAcknowledge briefly and adjust your approach now.` });
+            this.emit({ type: 'steering_applied', message: `Automatic steering delivered (${a.trigger}).` });
+          }
         }
       }
 
@@ -963,7 +1042,7 @@ export class AgentRunner {
         this.noteDialect('native');
         let stop = false;
         for (const call of calls) {
-          const r = await this.runOneCall({ id: call.id, name: call.name, args: call.args }, 'wire');
+          const r = await this.runOneCall(call, 'wire');
           if (callProgressed(r.entry)) turnProgress = true;
           if (this.stallStop) break;
           if (r.finished) {
@@ -1157,13 +1236,17 @@ function capOutput(s: string) {
 // successful writes/edits, passing verification, real state changes. Reads
 // and blocked calls are activity, never progress.
 function callProgressed(entry: ToolLogEntry): boolean {
-  if (entry.status !== 'ok') return false;
-  if (entry.fsChanged && entry.outcome !== 'blocked') return true;
+  if (entry.status !== 'ok' || entry.outcome === 'blocked') return false;
+  // Measurable progress = real state changes or PASSING verification. The
+  // FS_MAYBE_WRITERS branch marks commands fsChanged=true for journaling, so
+  // progress must classify by TOOL here: a bare `ls -la` success is activity
+  // (otherwise a command cycle would reset the stall clock forever).
   if (entry.tool === 'run_tests' || entry.tool === 'run_build') {
-    const exit = exitFromOutput(entry.output || '');
-    if (exit === 0) return true;
+    return exitFromOutput(entry.output || '') === 0;
   }
-  return false;
+  if (entry.tool === 'install_dependencies') return true;
+  if (FS_MAYBE_WRITERS.has(entry.tool)) return false;
+  return entry.fsChanged === true;
 }
 
 // Deterministic signature for the repetition guard: sorted keys, so

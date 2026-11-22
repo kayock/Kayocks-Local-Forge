@@ -59,8 +59,8 @@ export async function routeControl(req, res, url, p) {
     if (method === 'GET') { respond(res, await mesh.peerStatus(dec(m[1]))); return true; }
     if (method === 'DELETE') { respond(res, mesh.removePeer(dec(m[1]))); return true; }
   }
-  if ((m = match(p, /^\/api\/mesh\/([^/]+)\/proxy(\/api\/.*)$/))) {
-    const r = await mesh.proxyPeer(dec(m[1]), req, m[2], url.search || '');
+  if ((m = match(p, /^\/api\/mesh\/([^/]+)\/(proxy|p)(\/.*)$/))) {
+    const r = await mesh.proxyPeer(dec(m[1]), req, m[3], url.search || '');
     res.writeHead(r.status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
     res.end(r.body); return true;
   }
