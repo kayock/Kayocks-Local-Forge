@@ -1,0 +1,90 @@
+# One-time RC4 prerelease publication. Triggered when this workflow is
+# introduced through the reviewed v0.5-dev -> main merge. Manual re-run is
+# supported for troubleshooting, but existing releases are never overwritten.
+# Uses the EXACT installer already built and end-to-end verified in Windows CI.
+name: Publish LocalForge v0.5.0 RC4 prerelease
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-v0.5.0-rc4.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish-verified-rc4:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Assert verified source and exact Windows CI provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERIFIED_RUN: '45042085932'
+          VERIFIED_SHA: 'b7e5aaacaa4ca4ff7d78299f1e75b61be39bb941'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor "$VERIFIED_SHA" "$GITHUB_SHA" || {
+            echo "ERROR: RC4 verified commit is not an ancestor of main"; exit 1;
+          }
+          observed_conclusion=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$VERIFIED_RUN" --jq .conclusion)
+          observed_sha=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$VERIFIED_RUN" --jq .head_sha)
+          test "$observed_conclusion" = "success" || {
+            echo "ERROR: source Windows installer workflow is not successful"; exit 1;
+          }
+          test "$observed_sha" = "$VERIFIED_SHA" || {
+            echo "ERROR: installer run HEAD does not match expected source SHA"; exit 1;
+          }
+          echo "Verified installer provenance: run $VERIFIED_RUN / $VERIFIED_SHA"
+
+      - name: Download THE previously verified Windows installer and SHA-256 file
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p verified-assets
+          gh run download 45042085932 --repo "$GITHUB_REPOSITORY" \
+            --name localforge-windows-installer-unsigned \
+            --dir verified-assets
+          cd verified-assets
+          test -s LocalForge-Companion-Setup-0.5.0.exe
+          test -s SHA256SUMS.txt
+          sha256sum --check SHA256SUMS.txt
+          echo "PASS: previously verified installer bytes match source SHA256SUMS.txt"
+
+      - name: Publish v0.5.0-rc4 GitHub prerelease with verified installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v0.5.0-rc4
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "ERROR: $TAG already exists; refusing to overwrite a release."
+            exit 1
+          fi
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            echo "ERROR: $TAG tag already exists; refusing to repoint an existing tag."
+            exit 1
+          fi
+          gh release create "$TAG" \
+            verified-assets/LocalForge-Companion-Setup-0.5.0.exe \
+            verified-assets/SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title 'LocalForge v0.5.0 RC4 (prerelease)' \
+            --notes-file docs/releases/v0.5.0-rc4.md \
+            --prerelease
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --json url,isPrerelease,assets
