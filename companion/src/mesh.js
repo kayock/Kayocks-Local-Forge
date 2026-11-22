@@ -8,6 +8,7 @@ import dns from 'node:dns/promises';
 import net from 'node:net';
 import crypto from 'node:crypto';
 import { config, getState, saveState } from './config.js';
+import { DEFAULT_CHAT_TIMEOUT_MS } from './providers.js';
 import { hardwareInventory } from './platform.js';
 import * as tasks from './tasks.js';
 import { discoveryStatus } from './discovery.js';
@@ -151,6 +152,63 @@ const proxied = /^\/api\/(?:hardware|models(?:\/(?:dirs|load|unload|external|pro
 // Bare routes the routed IDE client needs: model chat and health probes
 // arrive as 'health' / 'chat' (no /api prefix) depending on the caller.
 const proxiedBare = /^\/(?:api\/)?(?:health|chat)$/;
+// Chat is streamed and the companion already emits a keepalive frame every
+// 15s while a model is loading or processing. The proxy must treat silence
+// as a stall, and keepalive/token bytes as progress. A hard 60s deadline on
+// the whole request aborted valid cold starts. Other routes keep a fixed
+// deadline. The chat hard ceiling is the companion's existing inference
+// timeout, not a new longer stall limit.
+export function meshProxyBudget(relativePath) {
+  if (relativePath === '/api/models/load') return { mode: 'deadline', ms: 30 * 60_000 };
+  if (/\/api\/ws\/[\w-]+\/(?:exec|term)/.test(relativePath)) return { mode: 'deadline', ms: 600_000 };
+  if (/^\/(?:api\/)?chat$/.test(relativePath)) {
+    return { mode: 'idle', idleMs: 60_000, deadlineMs: DEFAULT_CHAT_TIMEOUT_MS };
+  }
+  return { mode: 'deadline', ms: 60_000 };
+}
+
+export async function readProxyBody(body, budget, { abort } = {}) {
+  const iterator = body[Symbol.asyncIterator]();
+  const chunks = [];
+  const hardAt = Date.now() + (budget.mode === 'idle' ? budget.deadlineMs : budget.ms);
+  let idleAt = Date.now() + (budget.mode === 'idle' ? budget.idleMs : budget.ms);
+  let pending = iterator.next();
+  try {
+    while (true) {
+      const now = Date.now();
+      if (now >= hardAt) {
+        pending.catch(() => {});
+        abort?.();
+        throw Object.assign(new Error('Mesh proxy deadline exceeded'), { code: 'deadline' });
+      }
+      if (budget.mode === 'idle' && now >= idleAt) {
+        pending.catch(() => {});
+        abort?.();
+        throw Object.assign(new Error('Mesh proxy idle timeout: no bytes for 60s'), { code: 'idle' });
+      }
+      const wait = Math.max(1, Math.min(idleAt, hardAt) - now);
+      let timer;
+      const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve({ timeout: true }), wait); });
+      const result = await Promise.race([pending.then((v) => ({ v })), timeout]);
+      clearTimeout(timer);
+      if (result.timeout) continue;
+      pending = null;
+      if (result.v.done) break;
+      const value = result.v.value;
+      if (value && value.byteLength) {
+        chunks.push(Buffer.from(value));
+        if (budget.mode === 'idle') idleAt = Date.now() + budget.idleMs;
+      }
+      pending = iterator.next();
+    }
+  } catch (e) {
+    if (pending) pending.catch(() => {});
+    abort?.();
+    throw e;
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
 export async function proxyPeer(id, req, relativePath, query) {
   const rel = relativePath.startsWith('/') ? relativePath : `/${relativePath}`;
   if ((!proxied.test(rel) && !proxiedBare.test(rel)) || rel.includes('..') || rel.includes('%')) bad('This route is not available through mesh proxy', 403);
@@ -171,22 +229,24 @@ export async function proxyPeer(id, req, relativePath, query) {
     body = Buffer.concat(chunks).toString('utf8');
   }
   const ctrl = new AbortController();
-  // Model loading can legitimately take many minutes on local hardware;
-  // workspace exec mirrors the companion's own command timeout ceiling.
-  const timeout = relativePath === '/api/models/load' ? 30 * 60_000
-    : /\/api\/ws\/[\w-]+\/(?:exec|term)/.test(relativePath) ? 600_000
-    : 60000;
-  const timer = setTimeout(() => ctrl.abort(), timeout);
+  const budget = meshProxyBudget(relativePath);
+  // Bound the wait for response headers. Chat then switches to an idle
+  // timer so keepalive frames during model load are not a stall.
+  const headerMs = budget.mode === 'idle' ? budget.idleMs : budget.ms;
+  const headerTimer = setTimeout(() => ctrl.abort(), headerMs);
   try {
     const response = await fetch(`${peer.url}${relativePath}${query}`, {
       method, headers: { Authorization: `Bearer ${token}`, ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
       body, signal: ctrl.signal, redirect: 'error',
     });
-    const result = await response.text();
+    clearTimeout(headerTimer);
+    const result = response.body
+      ? await readProxyBody(response.body, budget, { abort: () => ctrl.abort() })
+      : '';
     if (Buffer.byteLength(result) > 8 * 1024 * 1024) bad('Peer response too large', 502);
     return { status: response.status, body: result };
   } catch (e) { bad(`Mesh proxy failed: ${e.message}`, 502); }
-  finally { clearTimeout(timer); }
+  finally { clearTimeout(headerTimer); }
 }
 export function lanAddresses() {
   const list = [];

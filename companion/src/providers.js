@@ -388,6 +388,13 @@ export async function proxyChat(body, { write, onClose }) {
     if (params.temperature != null) payload.temperature = params.temperature;
     if (params.topP != null) payload.top_p = params.topP;
     if (params.maxTokensExplicit === true && params.maxTokens != null) payload.max_tokens = params.maxTokens;
+    // Ollama's OpenAI route honors options.num_ctx. Send it only when the
+    // user explicitly set a context, and only to an Ollama port, so a model
+    // tag's own context (for example 193000) is not used and other servers
+    // are left unchanged.
+    if (/:11434(\/|$)/.test(base) && params.numCtxExplicit === true && params.numCtx != null) {
+      payload.options = { num_ctx: params.numCtx };
+    }
     if (tools?.length) {
       payload.tools = tools;
       payload.tool_choice = params.toolChoice || 'auto';

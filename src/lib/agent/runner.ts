@@ -321,7 +321,11 @@ export class AgentRunner {
       },
       fs: {
         listDir: async (p) => {
-          const rel = (!p || p === '.' || p === './') ? '' : String(p).replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '').replace(/\/+$/, '');
+          const relPath = canonRelPath(p ?? '.', this.cfg.workspaceMeta?.rootPath);
+          if (relPath.startsWith('/') || /^[A-Za-z]:\//.test(relPath) || relPath.split('/').includes('..')) {
+            throw new Error(`Path "${p}" is outside the workspace${this.cfg.workspaceMeta?.rootPath ? ` (${this.cfg.workspaceMeta.rootPath})` : ''}.`);
+          }
+          const rel = relPath === '.' ? '' : relPath;
           const t = await companion.tree(workspaceId, 8);
           const prefix = rel ? rel + '/' : '';
           return t.entries.filter((e) => e.path.startsWith(prefix) && !e.path.slice(prefix.length).includes('/'))

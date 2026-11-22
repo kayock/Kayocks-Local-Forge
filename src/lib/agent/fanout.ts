@@ -213,6 +213,12 @@ export class FanoutRunner {
       provider: machine.provider,
       model: machine.model,
       params: this.cfg.params,
+      workspaceMeta: {
+        id: this.cfg.workspaceId,
+        rootPath: this.cfg.workspacePath,
+        machineLabel: machine.name,
+        platform: 'unknown',
+      },
       systemPrompt: [
         this.cfg.contract ? contractPromptBlock(this.cfg.contract, { role: `${spec.stage} (fanout task "${spec.title}")` }) : '',
         `You are one agent inside a FAN-OUT wave on machine "${machine.name}". Other agents work on OTHER tasks in the same workspace, possibly on other machines. Respect write reservations; never revert other agents' work.`,

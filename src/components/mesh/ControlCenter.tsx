@@ -1029,6 +1029,7 @@ function CollaborateTab() {
       executionMode: (mode === 'fanout' ? 'sequential' : mode) as any, // fanout handled by runDistributedFanout
       autoSteering: autoSteer,
       maxTurnsPerStage: settings.agentTurns,
+      params: settings.inference,
     };
     setRunning(true);
     try {

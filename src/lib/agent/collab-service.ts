@@ -58,6 +58,9 @@ export interface CollabTaskConfig {
   reworkPasses?: number;
   stages?: Array<'planner' | 'coder' | 'tester' | 'reviewer' | 'debugger'>;
   fleetOverrides?: Record<string, ParticipationMode>;
+  // Inference settings from the IDE (context, temperature). Explicit numCtx
+  // is forwarded so a model tag's own context is not used instead.
+  params?: Partial<import('@/lib/types').InferenceParams>;
 }
 
 export interface CollabLaunch {
@@ -87,10 +90,15 @@ export function clientForMachine(peerId: string | null): CompanionClient {
 // this participant's own model + endpoint, never from another participant.
 const toTarget = (modelSizes: Record<string, number | null>, defaultTurns: number) => (p: CollabParticipant): AgentTarget => {
   if (!p.baseUrl?.trim()) throw new CollabConfigError(`${p.machineName} has no inference endpoint.`);
+  const baseUrl = p.baseUrl.trim();
+  // Port 11434 is Ollama. Its OpenAI-compatible route ignored an explicit
+  // num_ctx and loaded the model tag's own context. The native Ollama chat
+  // API is what applies options.num_ctx.
+  const kind = /:11434(\/|$)/.test(baseUrl) ? 'ollama' : 'openai';
   return {
     machineId: p.machineId,
     machineName: p.machineName,
-    provider: { kind: 'openai', baseUrl: p.baseUrl.trim() },
+    provider: { kind, baseUrl },
     model: p.model,
     profileId: p.profileId,
     residency: p.residency ?? 'on-demand',
@@ -195,6 +203,7 @@ export async function launchCollaborativeTask(
     // FALLBACK only — every target carries its own resolved protocol
     toolProtocol: undefined,
     autoSteering: cfg.autoSteering,
+    params: cfg.params,
     onEvent: opts.onEvent,
     approver: opts.approver,
     clientForMachine: (id) => clientForMachine(id === 'local' ? null : id),
@@ -498,7 +507,7 @@ export async function runDistributedFanout(
     machineId: p.machineId,
     name: p.machineName,
     model: p.model,
-    provider: { kind: 'openai', baseUrl: p.baseUrl.trim() } as any,
+    provider: { kind: /:11434(\/|$)/.test(p.baseUrl) ? 'ollama' : 'openai', baseUrl: p.baseUrl.trim() } as any,
     capableStages: p.roles.filter((r) => r !== 'reviewer') as any[],
     allowAutomatic: allowAutomatic(p.participation || 'enabled', p.explicitRun),
   }));

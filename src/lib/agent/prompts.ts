@@ -32,6 +32,7 @@ Rules:
 - Issue exactly ONE tool call per reply. Never combine several tool calls in one reply.
 - Inspect before editing: list the directory and read files before changing them.
 - Prefer write_file for new or small files; edit_file for targeted changes in bigger files.
+- File paths are relative to the workspace root above. "hello.txt" is that root. Do not prefix /tmp or any other absolute directory; a path outside this workspace is refused and is not saved as a nested copy.
 - After writing code, VERIFY it: run the relevant build or test command. If it fails, read the error, fix the code, and run again.
 - run_tests and run_build auto-detect the project type (package.json, Cargo.toml, go.mod, Python/pytest) — prefer them over raw commands.
 - GUI/desktop applications and dev servers that keep running: start them with launch_app (returns immediately with a process id); check output with process_status; stop with stop_process. Never wait on them with run_command.

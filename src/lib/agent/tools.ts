@@ -12,15 +12,59 @@ import type { ToolDef, ToolContext, ToolParam, ProcInfo } from './types';
 
 const cap = (s: string, n: number) => (s.length > n ? s.slice(0, n) + `\n... [truncated ${s.length - n} chars]` : s);
 
-// Canonicalize a user/model-supplied relative path: "./src" → "src",
-// "src/" → "src", ""/"." → ".". Prevents the classic mismatch where the same
-// directory is listed once as "repo" and once as "./repo" (and where a
-// leading ./ defeats the workspace tree prefix filter).
-export function canonRelPath(p: unknown): string {
-  let s = String(p ?? '').trim();
+// Canonicalize a model-supplied path.
+// "./src" → "src", "src/" → "src", ""/"." → ".".
+// An absolute path inside the known workspace root becomes that root's
+// relative path ("/tmp/ws/hello.txt" + root "/tmp/ws" → "hello.txt").
+// An absolute path outside the workspace is returned unchanged so callers
+// can refuse it. The leading slash is never stripped: that used to turn
+// "/tmp/old/hello.txt" into "tmp/old/hello.txt" and write it inside the
+// workspace.
+export function canonRelPath(p: unknown, workspaceRoot?: string): string {
+  let s = String(p ?? '').trim().replace(/\\/g, '/');
   if (!s) return '.';
-  s = s.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '').replace(/\/+$/, '');
-  return s || '.';
+  const root = workspaceRoot ? workspaceRoot.trim().replace(/\\/g, '/').replace(/\/+$/, '') : '';
+  if (isAbsolutePath(s)) {
+    if (root && (s === root || s.startsWith(root + '/'))) {
+      s = s.slice(root.length).replace(/^\/+/, '');
+    } else {
+      return s.replace(/\/+$/, '') || '/';
+    }
+  }
+  s = s.replace(/^\.\//, '').replace(/\/+$/, '');
+  const parts: string[] = [];
+  for (const seg of s.split('/')) {
+    if (!seg || seg === '.') continue;
+    parts.push(seg);
+  }
+  return parts.join('/') || '.';
+}
+
+export class WorkspacePathError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WorkspacePathError';
+  }
+}
+
+function isAbsolutePath(s: string): boolean {
+  return s.startsWith('/') || /^[A-Za-z]:\//.test(s);
+}
+
+// Tool entry: one workspace-relative path, or a refusal. Never rewrites an
+// outside absolute path into a nested relative path.
+function workspaceRel(p: unknown, ctx: { workspaceMeta?: { rootPath?: string } }): string {
+  const rel = canonRelPath(p, ctx.workspaceMeta?.rootPath);
+  const root = ctx.workspaceMeta?.rootPath;
+  if (isAbsolutePath(rel)) {
+    throw new WorkspacePathError(
+      `Path "${String(p)}" is outside the workspace${root ? ` (${root})` : ''}. Use a workspace-relative path such as "hello.txt". The path was not rewritten into the workspace.`,
+    );
+  }
+  if (rel.split('/').includes('..')) {
+    throw new WorkspacePathError(`Path "${String(p)}" escapes the workspace. Path traversal is blocked.`);
+  }
+  return rel;
 }
 
 // browser_verify checks may arrive as a JSON string from text-protocol models
@@ -239,7 +283,7 @@ export const CORE_TOOLS: ToolDef[] = [
     danger: 'safe',
     params: [{ name: 'path', type: 'string', description: 'Directory path relative to workspace root, e.g. "." or "src"', required: true }],
     async run(args, ctx: ToolContext) {
-      const p = canonRelPath(args.path ?? '.');
+      const p = workspaceRel(args.path ?? '.', ctx);
       // Forge upgrade (Problem B): check existence FIRST when the companion
       // supports it, so an empty result can never be mistaken for a missing
       // directory (the calculator regression).
@@ -292,10 +336,10 @@ export const CORE_TOOLS: ToolDef[] = [
       if (!ctx.fs.extractArchive) {
         return { output: 'Error: this companion does not support archive extraction (update the LocalForge Companion), or use run_command with your platform unzip/tar.', isError: true };
       }
-      const p = canonRelPath(args.path);
+      const p = workspaceRel(args.path, ctx);
       try {
         const r = await ctx.fs.extractArchive(p, {
-          dest: args.dest ? canonRelPath(args.dest) : '.',
+          dest: args.dest ? workspaceRel(args.dest, ctx) : '.',
           flatten: args.flatten === true || args.flatten === 'true',
           overwrite: args.overwrite === true || args.overwrite === 'true',
         });
@@ -316,7 +360,7 @@ export const CORE_TOOLS: ToolDef[] = [
     danger: 'safe',
     params: [{ name: 'path', type: 'string', description: 'File path relative to workspace root', required: true }],
     async run(args, ctx) {
-      const p = canonRelPath(args.path);
+      const p = workspaceRel(args.path, ctx);
       try {
         const f = await ctx.fs.readFile(p);
         return { output: cap(`Contents of ${p} (${f.size} bytes):\n${f.content}`, 40000) };
@@ -338,7 +382,7 @@ export const CORE_TOOLS: ToolDef[] = [
       { name: 'content', type: 'string', description: 'Full file contents to write', required: true },
     ],
     async run(args, ctx) {
-      const p = canonRelPath(args.path);
+      const p = workspaceRel(args.path, ctx);
       const content = typeof args.content === 'string' ? args.content : String(args.content ?? '');
       ctx.assertEditable?.(p);
       // Milestone 1: preview the diff BEFORE writing (best-effort; mock hosts
@@ -387,7 +431,7 @@ export const CORE_TOOLS: ToolDef[] = [
       { name: 'replaceAll', type: 'boolean', description: 'Replace every occurrence (default: require exactly one match)' },
     ],
     async run(args, ctx) {
-      const p = canonRelPath(args.path);
+      const p = workspaceRel(args.path, ctx);
       const find = String(args.find ?? '');
       const replace = String(args.replace ?? '');
       const all = args.replaceAll === true || args.replaceAll === 'true';
@@ -444,7 +488,7 @@ export const CORE_TOOLS: ToolDef[] = [
       { name: 'content', type: 'string', description: 'Text to append at the end of the file', required: true, aliases: ['text', 'body', 'addition'] },
     ],
     async run(args, ctx) {
-      const p = canonRelPath(args.path);
+      const p = workspaceRel(args.path, ctx);
       const content = typeof args.content === 'string' ? args.content : String(args.content ?? '');
       ctx.assertEditable?.(p);
       let existing = '';
@@ -482,7 +526,7 @@ export const CORE_TOOLS: ToolDef[] = [
       { name: 'path', type: 'string', description: 'Subdirectory to map (default: workspace root)', required: false },
     ],
     async run(args, ctx) {
-      const base = canonRelPath(args.path || '.');
+      const base = workspaceRel(args.path || '.', ctx);
       const listed = await ctx.fs.listDir(base);
       const entries = (listed ?? []) as { path: string; type: string; size?: number }[];
       const dirs = new Map<string, number>();
@@ -531,7 +575,7 @@ export const CORE_TOOLS: ToolDef[] = [
     danger: 'safe',
     params: [{ name: 'path', type: 'string', description: 'Directory path relative to workspace root', required: true }],
     async run(args, ctx) {
-      await ctx.fs.mkdir(canonRelPath(args.path));
+      await ctx.fs.mkdir(workspaceRel(args.path, ctx));
       return { output: `Created directory ${args.path}.` };
     },
   },
@@ -541,7 +585,7 @@ export const CORE_TOOLS: ToolDef[] = [
     danger: 'destructive',
     params: [{ name: 'path', type: 'string', description: 'Path relative to workspace root', required: true }],
     async run(args, ctx) {
-      const p = canonRelPath(args.path);
+      const p = workspaceRel(args.path, ctx);
       ctx.assertEditable?.(p);
       await ctx.fs.deletePath(p);
       return { output: `Deleted ${p}.` };
@@ -575,7 +619,8 @@ export const CORE_TOOLS: ToolDef[] = [
     ],
     async run(args, ctx) {
       const cmd = String(args.command ?? '');
-      const r = await ctx.runCommand(cmd, { cwd: args.cwd ? String(args.cwd) : undefined, timeoutMs: args.timeoutMs ? Number(args.timeoutMs) : undefined });
+      const cwd = args.cwd ? workspaceRel(args.cwd, ctx) : undefined;
+      const r = await ctx.runCommand(cmd, { cwd: cwd && cwd !== '.' ? cwd : undefined, timeoutMs: args.timeoutMs ? Number(args.timeoutMs) : undefined });
       const parts = [
         `$ ${cmd}`,
         `cwd: ${r.cwd ?? '(workspace root)'}`,
@@ -605,7 +650,8 @@ export const CORE_TOOLS: ToolDef[] = [
         return { output: 'Error: this companion does not support detached processes (update the LocalForge Companion).', isError: true };
       }
       const cmd = String(args.command ?? '');
-      const proc = await ctx.procs.launch(cmd, { cwd: args.cwd ? String(args.cwd) : undefined });
+      const cwd = args.cwd ? workspaceRel(args.cwd, ctx) : undefined;
+      const proc = await ctx.procs.launch(cmd, { cwd: cwd && cwd !== '.' ? cwd : undefined });
       if (proc.status === 'failed') {
         return { output: `Failed to start "${cmd}": ${proc.spawnError || 'unknown spawn error'}`, isError: true };
       }

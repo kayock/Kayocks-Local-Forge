@@ -245,7 +245,7 @@ export function canonicalSignature(tool: string, args: Record<string, any>): str
   const a = walk(args ?? {});
   for (const key of Object.keys(a)) {
     if (/^(path|dir|directory|folder|cwd|target)$/i.test(key) && typeof a[key] === 'string') {
-      const norm = String(a[key]).replace(/^\.\//, '').replace(/^\/+/, '').replace(/\/+$/, '');
+      const norm = String(a[key]).replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
       a[key] = norm === '' ? '.' : norm;
     }
   }
