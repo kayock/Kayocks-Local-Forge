@@ -23,7 +23,7 @@
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
 
-!define /ifndef VERSION "0.4.4"
+!define /ifndef VERSION "0.5.0"
 !define PRODUCT_NAME "LocalForge Companion"
 !define PRODUCT_PUBLISHER "LocalForge"
 !define PRODUCT_URL "https://d1jnn9t1yrn0-d.space-z.ai"

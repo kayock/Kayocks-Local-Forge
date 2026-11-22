@@ -25,9 +25,8 @@ export type CollabRole = 'planner' | 'coder' | 'tester' | 'reviewer';
 export interface CollabParticipant {
   machineId: string;        // 'local' or a mesh peer id
   machineName: string;
-  // the inference endpoint AS THE PARTICIPANT MACHINE SEES IT (e.g. FOXAI on
-  // the Windows Dell: http://127.0.0.1:8080/v1). For a managed profile the
-  // loaded server's own endpoint is used automatically.
+  // The inference endpoint as that machine sees it. Chosen from discovery
+  // on the selected computer. There is no built-in endpoint.
   baseUrl: string;
   model: string;
   roles: CollabRole[];      // which stages this participant may take
@@ -40,6 +39,11 @@ export interface CollabParticipant {
   // per-agent turn allowance; undefined = the collaborative default
   // (the IDE's own agent-turn setting — no hardcoded cap)
   maxTurns?: number;
+  platform?: string;
+  participation?: ParticipationMode;
+  // Manual and controller machines run only when the user selects them
+  // for this collaboration. That selection does not make them a retry target.
+  explicitRun?: boolean;
 }
 
 export interface CollabTaskConfig {
@@ -51,6 +55,9 @@ export interface CollabTaskConfig {
   executionMode: 'sequential' | 'parallel';
   autoSteering: boolean;
   maxTurnsPerStage?: number; // default: the IDE's agentTurns setting
+  reworkPasses?: number;
+  stages?: Array<'planner' | 'coder' | 'tester' | 'reviewer' | 'debugger'>;
+  fleetOverrides?: Record<string, ParticipationMode>;
 }
 
 export interface CollabLaunch {
@@ -78,18 +85,22 @@ export function clientForMachine(peerId: string | null): CompanionClient {
 
 // Each target carries ITS OWN protocol and turn allowance — resolved from
 // this participant's own model + endpoint, never from another participant.
-const toTarget = (modelSizes: Record<string, number | null>, defaultTurns: number) => (p: CollabParticipant): AgentTarget => ({
-  machineId: p.machineId,
-  machineName: p.machineName,
-  provider: { kind: 'openai', baseUrl: p.baseUrl || 'http://127.0.0.1:8080/v1' },
-  model: p.model,
-  profileId: p.profileId,
-  residency: p.residency ?? 'on-demand',
-  toolProtocol: !p.toolProtocol || p.toolProtocol === 'inherit'
-    ? useSettings.getState().effectiveProtocol(p.baseUrl || undefined, p.model)
-    : p.toolProtocol,
-  maxTurns: p.maxTurns ?? defaultTurns,
-});
+const toTarget = (modelSizes: Record<string, number | null>, defaultTurns: number) => (p: CollabParticipant): AgentTarget => {
+  if (!p.baseUrl?.trim()) throw new CollabConfigError(`${p.machineName} has no inference endpoint.`);
+  return {
+    machineId: p.machineId,
+    machineName: p.machineName,
+    provider: { kind: 'openai', baseUrl: p.baseUrl.trim() },
+    model: p.model,
+    profileId: p.profileId,
+    residency: p.residency ?? 'on-demand',
+    toolProtocol: !p.toolProtocol || p.toolProtocol === 'inherit'
+      ? useSettings.getState().effectiveProtocol(p.baseUrl || undefined, p.model)
+      : p.toolProtocol,
+    maxTurns: p.maxTurns ?? defaultTurns,
+    allowAutomatic: allowAutomatic(p.participation || 'enabled', p.explicitRun),
+  };
+};
 
 // Model size lookup from the participant's own inventory (scheduler input).
 async function collectModelSizes(cfg: CollabTaskConfig, mesh: MeshClient): Promise<Record<string, number | null>> {
@@ -125,6 +136,11 @@ export async function launchCollaborativeTask(
 ): Promise<CollabLaunch> {
   if (!cfg.objective.trim()) throw new CollabConfigError('Enter a development objective first.');
   if (cfg.participants.length === 0) throw new CollabConfigError('Add at least one participating computer.');
+  try {
+    cfg = { ...cfg, participants: assertFleetParticipants(cfg.participants, cfg.fleetOverrides) };
+  } catch (e: any) {
+    throw new CollabConfigError(String(e?.message || e));
+  }
 
   // Turn allowance: the collaborative default is the IDE's own agent-turn
   // setting (no artificial 20-turn cap); per-agent overrides win.
@@ -173,7 +189,8 @@ export async function launchCollaborativeTask(
     machines: cfg.participants.map(toTarget(modelSizes, defaultTurns)),
     modelSizes,
     maxTurnsPerStage: cfg.maxTurnsPerStage ?? 20,
-    reworkPasses: 1,
+    reworkPasses: cfg.reworkPasses ?? 1,
+    stages: cfg.stages,
     reassignOnEscalation: true,
     // FALLBACK only — every target carries its own resolved protocol
     toolProtocol: undefined,
@@ -210,6 +227,7 @@ import type { TaskContract } from './task-contract';
 import { AgentRunner } from './runner';
 import { toolsByNames } from './tools';
 import { createContract, contractPromptBlock } from './task-contract';
+import { allowAutomatic, assertFleetParticipants, type ParticipationMode } from '@/lib/fleet/participation';
 
 export interface FanoutLaunch {
   runner: FanoutRunner;
@@ -382,6 +400,11 @@ export async function runDistributedFanout(
 ): Promise<FanoutLaunch> {
   if (!cfg.objective.trim()) throw new CollabConfigError('Enter a development objective first.');
   if (cfg.participants.length === 0) throw new CollabConfigError('Add at least one participating computer.');
+  try {
+    cfg = { ...cfg, participants: assertFleetParticipants(cfg.participants, cfg.fleetOverrides) };
+  } catch (e: any) {
+    throw new CollabConfigError(String(e?.message || e));
+  }
   const defaultTurns = cfg.maxTurnsPerStage ?? useSettings.getState().agentTurns;
 
   const modelSizes = await collectModelSizes(cfg, opts.mesh);
@@ -475,8 +498,9 @@ export async function runDistributedFanout(
     machineId: p.machineId,
     name: p.machineName,
     model: p.model,
-    provider: { kind: 'openai', baseUrl: p.baseUrl || 'http://127.0.0.1:8080/v1' } as any,
+    provider: { kind: 'openai', baseUrl: p.baseUrl.trim() } as any,
     capableStages: p.roles.filter((r) => r !== 'reviewer') as any[],
+    allowAutomatic: allowAutomatic(p.participation || 'enabled', p.explicitRun),
   }));
   const fanout = new FanoutRunner({
     workspaceHost: opts.workspaceHost,

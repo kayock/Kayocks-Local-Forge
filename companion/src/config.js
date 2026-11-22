@@ -5,7 +5,20 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 
-export const VERSION = '0.4.5';
+// One product identity: companion/package.json. `version` stays a numeric
+// semver for installers; `localforgeRelease` is what running components report.
+function productVersion() {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+    const release = typeof pkg.localforgeRelease === 'string' ? pkg.localforgeRelease.trim() : '';
+    const version = typeof pkg.version === 'string' ? pkg.version.trim() : '';
+    return release || version || '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+
+export const VERSION = productVersion();
 
 // Node, Bun, and compiled executable launchers can include different numbers
 // of runtime/entry-point arguments. Scan every argv item after argv[0] for

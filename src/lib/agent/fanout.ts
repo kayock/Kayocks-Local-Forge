@@ -42,6 +42,9 @@ export interface FanoutMachine {
   provider: ProviderConfig;
   // roles this machine may take (capability-aware routing input)
   capableStages?: FanoutStage[];
+  // false: this machine may receive an explicit assignment, but busy/failure
+  // retries must not move work onto it. Undefined keeps prior behavior.
+  allowAutomatic?: boolean;
 }
 
 export interface FanoutTaskSpec {
@@ -163,14 +166,19 @@ export class FanoutRunner {
     return waves;
   }
 
-  private pickMachine(spec: FanoutTaskSpec, exclude?: string): FanoutMachine {
-    const explicit = spec.machineId && spec.machineId !== 'auto'
-      ? this.cfg.machines.find((m) => m.machineId === spec.machineId)
-      : undefined;
-    if (explicit && (!exclude || explicit.machineId !== exclude)) return explicit;
-    const capable = this.cfg.machines.filter((m) => m.machineId !== exclude)
-      .filter((m) => !m.capableStages?.length || m.capableStages.includes(spec.stage));
-    return capable[0] ?? this.cfg.machines.find((m) => m.machineId !== exclude) ?? this.cfg.machines[0];
+  private pickMachine(spec: FanoutTaskSpec, exclude?: string): FanoutMachine | null {
+    const pool = this.cfg.machines.filter((m) => !exclude || m.machineId !== exclude);
+    if (spec.machineId && spec.machineId !== 'auto') {
+      const explicit = pool.find((m) => m.machineId === spec.machineId);
+      if (explicit) return explicit;
+    }
+    const capableOf = (list: FanoutMachine[]) => list.filter((m) => !m.capableStages?.length || m.capableStages.includes(spec.stage));
+    const automatic = capableOf(pool.filter((m) => m.allowAutomatic !== false));
+    if (automatic.length) return automatic[0];
+    // Retries never move onto a manual machine. A first assignment may use
+    // the machines already selected for this run when none are automatic.
+    if (exclude) return null;
+    return capableOf(pool)[0] ?? null;
   }
 
   private async revision(peerId: string | null): Promise<string | null> {
@@ -237,6 +245,13 @@ export class FanoutRunner {
   private async runOne(spec: FanoutTaskSpec, priorFailure?: { machineId: string; error: string; taskId: string }): Promise<FanoutTaskResult> {
     const machine = this.pickMachine(spec, priorFailure?.machineId);
     const attempts = (priorFailure ? 1 : 0) + 1;
+    if (!machine) {
+      return {
+        key: spec.key, taskId: null, machine: '—', machineId: '—', model: '—',
+        status: 'failed', summary: '', turns: 0, filesChanged: [], attempts,
+        error: 'No participating worker is allowed to take this task. Manual machines are not used as automatic fallbacks.',
+      };
+    }
     const dedupKey = `${spec.key}${priorFailure ? `:retry` : ''}`;
     let taskId: string | null = null;
     const revBefore = await this.revision(null);
@@ -303,7 +318,7 @@ export class FanoutRunner {
     if (failed && this.cfg.reassignOnFailure !== false && !priorFailure) {
       // one explicit reassignment with the full handoff preserved
       await this.cfg.mesh.failTask(this.cfg.workspaceId, taskId, { reason: r.note || 'machine failed', recoverable: true }).catch(() => {});
-      const otherMachines = this.cfg.machines.filter((m) => m.machineId !== machine.machineId);
+      const otherMachines = this.cfg.machines.filter((m) => m.machineId !== machine.machineId && m.allowAutomatic !== false);
       if (otherMachines.length) {
         this.cfg.onEvent({ type: 'escalation', fromModel: machine.model, toModel: otherMachines[0].model, reason: `Task "${spec.title}" failed on ${machine.name}; reassigning to ${otherMachines[0].name}.` });
         return { ...(await this.runOne(spec, { machineId: machine.machineId, error: r.note || 'failed', taskId })), attempts: attempts + 1, reassignedFrom: machine.name, revisionBefore: revBefore };

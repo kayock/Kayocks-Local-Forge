@@ -15,7 +15,7 @@ function gitCommit() {
 let version = '0.0.0';
 try {
   const companion = JSON.parse(readFileSync(new URL('../companion/package.json', import.meta.url), 'utf8'));
-  version = companion.version || version;
+  version = companion.localforgeRelease || companion.version || version;
 } catch { /* keep fallback */ }
 
 const commit = gitCommit();

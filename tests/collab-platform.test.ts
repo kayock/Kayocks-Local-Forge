@@ -144,8 +144,8 @@ afterAll(async () => { /* hook timeout raised: companion shutdown + rm can excee
 
 function makeConfig(overrides: Partial<Record<'planner' | 'coder' | 'tester', Partial<import('../src/lib/agent/collab-service').CollabParticipant>>> = {}) {
   const participants = [
-    { machineId: 'local', machineName: 'Ubuntu Station', baseUrl: stubAUrl, model: 'planner-model', roles: ['planner', 'reviewer'] as any[], toolProtocol: 'native' as const },
-    { machineId: peerB, machineName: 'Windows Dell', baseUrl: stubBUrl, model: 'qwen3-coder', roles: ['coder'] as any[], toolProtocol: 'native' as const },
+    { machineId: 'local', machineName: 'Ubuntu Station', baseUrl: stubAUrl, model: 'planner-model', roles: ['planner', 'reviewer'] as any[], toolProtocol: 'native' as const, explicitRun: true },
+    { machineId: peerB, machineName: 'Windows Dell', baseUrl: stubBUrl, model: 'qwen3-coder', roles: ['coder'] as any[], toolProtocol: 'native' as const, explicitRun: true },
     { machineId: peerC, machineName: 'Ubuntu Portable', baseUrl: stubCUrl, model: 'tester-model', roles: ['tester'] as any[], toolProtocol: 'text' as const },
   ];
   for (const [role, patch] of Object.entries(overrides)) {

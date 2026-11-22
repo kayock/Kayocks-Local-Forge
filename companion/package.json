@@ -1,6 +1,7 @@
 {
   "name": "@localforge/companion",
   "version": "0.5.0",
+  "localforgeRelease": "0.5.0-rc4",
   "description": "LocalForge IDE local companion: connects the browser IDE to local AI models, project files, terminals and builds on the customer's own machine.",
   "type": "module",
   "main": "src/server.js",

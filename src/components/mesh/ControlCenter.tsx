@@ -17,6 +17,7 @@ import { useWorkspace } from '@/lib/store/workspace';
 import { useSettings } from '@/lib/store/settings';
 import { CompanionClient } from '@/lib/companion/client';
 import { clientForMachine, launchCollaborativeTask, runDistributedFanout, startCollabRun, type CollabRunMode, type CollabRunHandle, type CollabParticipant, type CollabTaskConfig, type CollabRole } from '@/lib/agent/collab-service';
+import { defaultParticipation, isExcludedWindowsLlama, isPlaceholderEndpoint, resolveParticipation, type ParticipationMode } from '@/lib/fleet/participation';
 import type { ProtocolSetting } from '@/lib/store/settings';
 import type { AgentEvent } from '@/lib/agent/types';
 import type { CoordinatorReport } from '@/lib/agent/coordinator';
@@ -143,6 +144,8 @@ function ComputersTab() {
     <div className="space-y-4">
       <HardwareCard hw={mesh.primaryHardware} name="This computer (primary)" suffix={mesh.models ? `${mesh.models.servers.filter((s) => s.status === 'ready').length} model server(s) ready` : undefined} />
 
+      <FleetParticipation />
+
       {/* connect form */}
       <div className="rounded-lg border p-3 space-y-2">
         <p className="text-sm font-medium flex items-center gap-2"><Plug className="w-4 h-4 text-primary" /> Connect a computer</p>
@@ -213,6 +216,86 @@ interface NetInfo {
   loopbackUrl: string;
   security: { pairingRequired: boolean; note: string };
   service: { systemdUnit: string; managementHint: string };
+}
+
+function FleetParticipation() {
+  const mesh = useMesh();
+  const [overrides, setOverrides] = useState<Record<string, ParticipationMode>>({});
+  const [note, setNote] = useState<string | null>(null);
+
+  useEffect(() => {
+    mesh.client().fleetParticipation().then((r) => setOverrides(r.participation || {})).catch(() => setNote('Participation settings are unavailable until the companion answers.'));
+  }, [mesh.peers.length]);
+
+  const rows = [
+    {
+      machineId: 'local',
+      name: mesh.primaryHardware?.hostname || 'This computer',
+      platform: mesh.primaryHardware?.platform,
+      connected: !!mesh.primaryHardware,
+    },
+    ...mesh.peers.map((p) => ({
+      machineId: p.id,
+      name: p.name,
+      platform: p.platform || mesh.peerStatus[p.id]?.health?.platform,
+      connected: mesh.peerStatus[p.id] ? !!mesh.peerStatus[p.id].reachable : p.lastStatus !== 'unreachable',
+    })),
+  ];
+
+  const roleOf = (machineId: string, name: string, platform?: string) => {
+    const mode = resolveParticipation({ machineId, name, platform }, overrides);
+    if (mode === 'controller' || machineId === 'local') return 'Controller';
+    if (defaultParticipation({ machineId, name, platform }) === 'enabled' || /portable/i.test(name)) return 'Primary worker';
+    return 'Secondary worker';
+  };
+
+  const setMode = async (machineId: string, mode: ParticipationMode) => {
+    setNote(null);
+    try {
+      const r = await mesh.client().setFleetParticipation(machineId, mode);
+      setOverrides(r.participation || {});
+    } catch (e: any) {
+      setNote(String(e?.message || e));
+    }
+  };
+
+  return (
+    <div className="rounded-lg border p-3 space-y-2">
+      <p className="text-sm font-medium">Fleet participation</p>
+      <p className="text-[11px] text-muted-foreground">Connected does not mean eligible. Manual machines stay visible and are used only when a run explicitly includes them. A busy or failed preferred worker does not move work onto a manual machine.</p>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead className="text-left text-muted-foreground">
+            <tr><th className="py-1 pr-3 font-medium">Machine</th><th className="py-1 pr-3 font-medium">Role</th><th className="py-1 pr-3 font-medium">Connected</th><th className="py-1 font-medium">Participation</th></tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => {
+              const mode = resolveParticipation(row, overrides);
+              return (
+                <tr key={row.machineId} className="border-t">
+                  <td className="py-1.5 pr-3">{row.name}</td>
+                  <td className="py-1.5 pr-3">{roleOf(row.machineId, row.name, row.platform)}</td>
+                  <td className="py-1.5 pr-3">{row.connected ? 'Yes' : 'No'}</td>
+                  <td className="py-1.5">
+                    {row.machineId === 'local' ? <span>Controller</span> : (
+                      <Select value={mode === 'controller' ? 'manual' : mode} onValueChange={(v) => setMode(row.machineId, v as ParticipationMode)}>
+                        <SelectTrigger className="h-7 w-[140px] text-xs"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="enabled">Enabled</SelectItem>
+                          <SelectItem value="manual">Manual only</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {note && <p className="text-[11px] text-destructive">{note}</p>}
+    </div>
+  );
 }
 
 function NetworkingPanel() {
@@ -687,7 +770,7 @@ function ProfileCreateDialog({ open, onClose, onSaved, machineId }: { open: bool
             </>
           )}
           {(form.backend === 'external' || form.backend === 'foxai') && (
-            <Input placeholder="Endpoint (e.g. http://127.0.0.1:8080/v1)" value={form.endpoint || ''} onChange={(e) => set('endpoint', e.target.value)} />
+            <Input placeholder="Endpoint on that machine" value={form.endpoint || ''} onChange={(e) => set('endpoint', e.target.value)} />
           )}
           <div className="grid grid-cols-2 gap-2">
             <label className="space-y-1"><span className="text-muted-foreground">Context window</span><Input value={form.ctx ?? ''} onChange={(e) => set('ctx', Number(e.target.value) || undefined)} /></label>
@@ -815,9 +898,10 @@ function CollaborateTab() {
   const mesh = useMesh();
   const ws = useWorkspace();
   const settings = useSettings();
-  const [participants, setParticipants] = useState<CollabParticipant[]>(() => [
-    { machineId: 'local', machineName: 'This computer', baseUrl: 'http://127.0.0.1:8080/v1', model: settings.model || 'qwen3-coder-30b-a3b-instruct', roles: ['planner', 'reviewer'], residency: 'on-demand' },
-  ]);
+  const [participants, setParticipants] = useState<CollabParticipant[]>([]);
+  const [fleetOverrides, setFleetOverrides] = useState<Record<string, ParticipationMode>>({});
+  const [endpointChoices, setEndpointChoices] = useState<Record<number, { baseUrl: string; models: string[]; label: string }[]>>({});
+  const seeded = useRef(false);
   const [mode, setMode] = useState<'sequential' | 'parallel' | 'fanout'>('sequential');
   const [autoSteer, setAutoSteer] = useState(true);
   const [objective, setObjective] = useState('');
@@ -844,12 +928,38 @@ function CollaborateTab() {
 
   useEffect(() => { feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight }); }, [feed.length]);
 
-  // hydrate persisted participant presets once
   useEffect(() => {
+    mesh.client().fleetParticipation().then((r) => setFleetOverrides(r.participation || {})).catch(() => {});
+  }, [mesh.peers.length]);
+
+  // Presets the user saved are kept. The old hard-coded endpoint is cleared.
+  // A fresh form prefers the enabled worker and does not invent an endpoint.
+  useEffect(() => {
+    if (seeded.current) return;
     const saved = (settings as any).collabParticipants as CollabParticipant[] | undefined;
-    if (saved && saved.length) setParticipants(saved as CollabParticipant[]);
-     
-  }, []);
+    const clean = (list: CollabParticipant[]) => list.map((p) => (
+      isPlaceholderEndpoint(p.baseUrl, p.model) ? { ...p, baseUrl: '', model: '' } : p
+    ));
+    if (saved && saved.length) {
+      seeded.current = true;
+      setParticipants(clean(saved));
+      return;
+    }
+    const preferred = mesh.peers.find((p) => resolveParticipation({ machineId: p.id, name: p.name, platform: p.platform }, fleetOverrides) === 'enabled');
+    if (!preferred) return;
+    seeded.current = true;
+    setParticipants([{
+      machineId: preferred.id,
+      machineName: preferred.name,
+      baseUrl: '',
+      model: '',
+      roles: ['planner', 'coder'],
+      residency: 'on-demand',
+      platform: preferred.platform,
+      participation: 'enabled',
+      explicitRun: true,
+    }]);
+  }, [mesh.peers, fleetOverrides]);
 
   const saveParticipants = (ps: CollabParticipant[]) => {
     setParticipants(ps);
@@ -897,11 +1007,25 @@ function CollaborateTab() {
     const wsRec = hostWorkspaces.find((w) => w.id === wsSel);
     if (!wsRec) { setError(`Select a project on ${hostName} first — its workspace list is loaded in the Authoritative workspace panel.`); return; }
     const wsHostClient = clientForMachine(hostId === 'local' ? null : hostId);
+    const prepared = participants.map((p) => {
+      const peer = mesh.peers.find((x) => x.id === p.machineId);
+      const platform = p.machineId === 'local' ? mesh.primaryHardware?.platform : (p.platform || peer?.platform);
+      const machineName = p.machineId === 'local' ? 'This computer' : (peer?.name || p.machineName);
+      const participation = resolveParticipation({ machineId: p.machineId, name: machineName, platform, participation: p.participation }, fleetOverrides);
+      return {
+        ...p,
+        machineName,
+        platform,
+        participation,
+        explicitRun: participation === 'enabled' ? true : !!p.explicitRun,
+      };
+    });
     const cfg: CollabTaskConfig = {
       objective,
       workspaceHostPeerId: hostId === 'local' ? null : hostId,
       workspaceHostMachineName: hostName,
-      participants,
+      participants: prepared,
+      fleetOverrides,
       executionMode: (mode === 'fanout' ? 'sequential' : mode) as any, // fanout handled by runDistributedFanout
       autoSteering: autoSteer,
       maxTurnsPerStage: settings.agentTurns,
@@ -964,7 +1088,48 @@ function CollaborateTab() {
   const addParticipant = () => {
     const used = new Set(participants.map((p) => p.machineId));
     const free = machineOptions.find((m) => !used.has(m.id)) || machineOptions[0];
-    saveParticipants([...participants, { machineId: free.id, machineName: free.name, baseUrl: 'http://127.0.0.1:8080/v1', model: settings.model || 'qwen3-coder-30b-a3b-instruct', roles: ['coder', 'tester'], residency: 'on-demand' }]);
+    const peer = mesh.peers.find((p) => p.id === free.id);
+    const platform = free.id === 'local' ? mesh.primaryHardware?.platform : peer?.platform;
+    const participation = resolveParticipation({ machineId: free.id, name: free.name, platform }, fleetOverrides);
+    saveParticipants([...participants, {
+      machineId: free.id,
+      machineName: free.name,
+      baseUrl: '',
+      model: '',
+      roles: ['coder'],
+      residency: 'on-demand',
+      platform,
+      participation,
+      explicitRun: participation === 'enabled',
+    }]);
+  };
+
+  const discoverEndpoints = async (i: number) => {
+    const p = participants[i];
+    const peer = mesh.peers.find((x) => x.id === p.machineId);
+    const platform = p.machineId === 'local' ? mesh.primaryHardware?.platform : (p.platform || peer?.platform);
+    const identity = { machineId: p.machineId, name: p.machineName, platform };
+    if ((platform || '').toLowerCase() === 'win32' || /windows/i.test(p.machineName)) {
+      setError('Windows endpoints are not probed. Choose an approved endpoint yourself if this run should use Windows.');
+      return;
+    }
+    setError(null);
+    try {
+      const found = await clientForMachine(p.machineId === 'local' ? null : p.machineId).discoverProviders();
+      const choices = (found.providers || [])
+        .filter((d) => d.reachable && d.baseUrl && !isExcludedWindowsLlama(d.baseUrl, identity))
+        .map((d) => ({ baseUrl: d.baseUrl, models: (d.models || []).map((m) => m.id).filter(Boolean), label: d.name || d.baseUrl }));
+      setEndpointChoices((prev) => ({ ...prev, [i]: choices }));
+      if (choices.length === 1 && choices[0].models.length === 1) {
+        updParticipant(i, { baseUrl: choices[0].baseUrl, model: choices[0].models[0] });
+      } else if (choices.length === 1) {
+        updParticipant(i, { baseUrl: choices[0].baseUrl });
+      } else if (!choices.length) {
+        setError(`No inference endpoint is already running on ${p.machineName}. Start one there, or type the endpoint that machine uses.`);
+      }
+    } catch (e: any) {
+      setError(`Could not discover endpoints on ${p.machineName}: ${String(e?.message || e)}`);
+    }
   };
 
   const updParticipant = (i: number, patch: Partial<CollabParticipant>) =>
@@ -1032,13 +1197,20 @@ function CollaborateTab() {
                   {machineOptions.map((m) => <SelectItem key={m.id} value={m.id}>{m.name}</SelectItem>)}
                 </SelectContent>
               </Select>
-              <Input className="h-7 text-xs flex-1 min-w-[180px]" placeholder="Inference endpoint (as THAT machine sees it)" value={p.baseUrl} onChange={(e) => updParticipant(i, { baseUrl: e.target.value })} />
+              <Input className="h-7 text-xs flex-1 min-w-[180px]" placeholder="Inference endpoint on that machine" value={p.baseUrl} onChange={(e) => updParticipant(i, { baseUrl: e.target.value })} />
               <Input className="h-7 text-xs w-[170px]" placeholder="Model" value={p.model} onChange={(e) => updParticipant(i, { model: e.target.value })} />
+              <Button size="sm" variant="outline" className="h-7 text-[10px]" onClick={() => discoverEndpoints(i)}>Discover</Button>
               {participants.length > 1 && (
                 <Button size="sm" variant="outline" className="h-7 text-[10px] text-destructive" onClick={() => saveParticipants(participants.filter((_, idx) => idx !== i))}><Trash2 className="w-3 h-3" /></Button>
               )}
             </div>
             <div className="flex items-center gap-1.5 flex-wrap">
+              {resolveParticipation({ machineId: p.machineId, name: p.machineName, platform: p.platform || mesh.peers.find((x) => x.id === p.machineId)?.platform }, fleetOverrides) !== 'enabled' && (
+                <label className="flex items-center gap-1 text-[10px]">
+                  <input type="checkbox" className="accent-[hsl(var(--primary))]" checked={!!p.explicitRun} onChange={(e) => updParticipant(i, { explicitRun: e.target.checked })} />
+                  Include in this run
+                </label>
+              )}
               <span className="text-[10px] text-muted-foreground">Roles:</span>
               {ROLE_ORDER.map((role) => (
                 <button key={role} className={`px-2 py-0.5 rounded border text-[10px] ${p.roles.includes(role) ? 'border-primary text-primary bg-primary/10' : 'text-muted-foreground'}`} onClick={() => toggleRole(i, role)}>
@@ -1071,10 +1243,21 @@ function CollaborateTab() {
               <span className="text-[10px] text-muted-foreground ml-2">turns:</span>
               <Input className="h-6 w-[70px] text-[10px]" placeholder={String(settings.agentTurns)} value={p.maxTurns ?? ''} onChange={(e) => updParticipant(i, { maxTurns: e.target.value === '' ? undefined : (Math.max(1, Math.min(500, Math.round(Number(e.target.value) || 0))) || undefined) })} />
             </div>
+            {(endpointChoices[i] || []).length > 1 && (
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-[10px] text-muted-foreground">Choose an endpoint on {p.machineName}:</span>
+                {endpointChoices[i].map((c) => (
+                  <button key={c.baseUrl} className={`px-2 py-0.5 rounded border text-[10px] ${p.baseUrl === c.baseUrl ? 'border-primary text-primary' : 'text-muted-foreground'}`} onClick={() => updParticipant(i, { baseUrl: c.baseUrl, model: c.models.length === 1 ? c.models[0] : '' })}>
+                    {c.label} · {c.baseUrl}
+                  </button>
+                ))}
+              </div>
+            )}
+            <p className="text-[10px] text-muted-foreground">Inference for this participant: {p.machineName}{p.baseUrl ? ` · ${p.baseUrl}` : ' · no endpoint selected'}{p.model ? ` · ${p.model}` : ''}</p>
           </div>
         ))}
         <p className="text-[10px] text-muted-foreground">
-          The endpoint is the address the PARTICIPANT machine itself uses for inference (e.g. the Windows Dell&apos;s FOXAI: http://127.0.0.1:8080/v1). With several computers sharing a role, the resource-aware scheduler picks per stage from real hardware data. The Station can host the workspace and coordination without hosting a permanently loaded planning model.
+          Endpoints are discovered on the selected machine and are not filled in for you when more than one is available. Discovery only lists servers that are already running. Work runs on Enabled machines. A Manual machine runs only when Include in this run is checked, and a failure on the preferred worker does not move the task there.
         </p>
       </div>
 
@@ -1096,7 +1279,7 @@ function CollaborateTab() {
         </div>
         <Textarea placeholder="Development objective — e.g. &quot;Add a settings page with theme persistence to the app, write tests, make them pass&quot;" value={objective} onChange={(e) => setObjective(e.target.value)} className="min-h-[72px] text-sm" />
         <div className="flex items-center gap-2">
-          <Button size="sm" onClick={start} disabled={running || !objective.trim() || !ws.workspaceId}>
+          <Button size="sm" onClick={start} disabled={running || !objective.trim() || !ws.workspaceId || participants.length === 0}>
             {running ? <Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" /> : <Play className="w-3.5 h-3.5 mr-1" />}
             {running ? 'Collaborative task running…' : 'Start collaborative task'}
           </Button>

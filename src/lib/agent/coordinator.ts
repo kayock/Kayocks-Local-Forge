@@ -48,6 +48,9 @@ export interface AgentTarget {
   // protocol and turn allowance — a reassigned replacement brings its own.
   toolProtocol?: ToolProtocolMode | 'auto-native' | 'force-text';
   maxTurns?: number;
+  // false: eligible for an explicit stage assignment, not for automatic
+  // ranking or failure fallback.
+  allowAutomatic?: boolean;
 }
 
 export interface CoordinatorConfig {
@@ -65,6 +68,8 @@ export interface CoordinatorConfig {
   modelSizes?: Record<string, number | null>; // profileId or `${machineId}:${model}` → bytes
   maxTurnsPerStage?: number;
   reworkPasses?: number;
+  // When set, stages not listed are not run. The default pipeline is unchanged.
+  stages?: StageId[];
   reassignOnEscalation?: boolean;
   toolProtocol?: ToolProtocolMode | 'auto-native' | 'force-text';
   autoSteering?: boolean;
@@ -182,11 +187,18 @@ export class Coordinator {
    */
   async assignStage(stage: StageId, explicit?: AgentTarget): Promise<{ target: AgentTarget; reasons: string[] }> {
     if (explicit) return { target: explicit, reasons: ['manually assigned by the user'] };
+    const automatic = this.cfg.machines.filter((m) => m.allowAutomatic !== false);
+    // Enabled workers win. If this run selected only manual or controller
+    // machines, those selections are eligible. A manual machine is not added
+    // while an enabled worker exists.
+    const pool = automatic.length ? automatic : this.cfg.machines;
+    if (!pool.length) throw new Error(`No automatic worker is allowed to take the ${stage} stage.`);
     const { candidates } = await this.gatherCandidates();
-    const ranked = rankCandidates(candidates, ROLE_OF_STAGE[stage], { largestModelBytes: null });
+    const ids = new Set(pool.map((m) => m.machineId));
+    const ranked = rankCandidates(candidates.filter((c) => ids.has(c.machine.id)), ROLE_OF_STAGE[stage], { largestModelBytes: null });
     const best = ranked.find((r) => !r.hardBlocked) ?? ranked[0];
-    const t = this.cfg.machines.find((m) => (m.machineId === best.candidate.machine.id && m.model === best.candidate.profile.name)) ?? this.cfg.machines[0];
-    return { target: t, reasons: best.reasons };
+    const t = pool.find((m) => best && m.machineId === best.candidate.machine.id && m.model === best.candidate.profile.name) ?? pool[0];
+    return { target: t, reasons: best?.reasons ?? ['only automatic workers are eligible'] };
   }
 
   private agentIdFor(stage: StageId, attempt: number): string {
@@ -479,7 +491,13 @@ export class Coordinator {
       // exactly where it stopped). A user pause (no hitTurnLimit) stops the run.
       if (coderRun.r.paused && !coderRun.r.hitTurnLimit) return this.report(results, 'UNKNOWN', reworkUsed, totalTurns, conflicts, 'paused');
 
+      const stageOn = (stage: StageId) => !this.cfg.stages || this.cfg.stages.includes(stage);
+      if (!stageOn('tester') && !stageOn('reviewer')) break;
+
       // 3. TESTER (may run on a different machine — e.g. the GPU worker)
+      if (!stageOn('tester')) {
+        // A run that names its stages does not invent tester work.
+      } else {
       const testerAssign = await this.assignStage('tester', explicitTargets?.tester);
       const testerRun = await this.runAgent('tester', testerAssign.target, this.stageTask('tester', plan, { coder: coderSummary }), []);
       totalTurns += testerRun.r.turns;
@@ -515,6 +533,7 @@ export class Coordinator {
       if (dbgRun.conflict) conflicts.push(dbgRun.conflict);
       if (dbgRun.r.paused) return this.report(results, verdict, reworkUsed, totalTurns, conflicts, 'paused');
       this.escalations = this.escalations.filter((e) => e.stage !== 'coder');
+      }
     }
 
     return this.report(results, verdict, reworkUsed, totalTurns, conflicts);
@@ -522,9 +541,11 @@ export class Coordinator {
 
   // pick a DIFFERENT machine than the one that escalated (spec §7 step 6)
   private async alternativeMachine(stage: StageId, failedMachineId: string, explicit?: AgentTarget): Promise<AgentTarget | undefined> {
-    if (explicit) return explicit;
+    if (explicit && explicit.allowAutomatic !== false) return explicit;
+    if (explicit?.allowAutomatic === false) return undefined;
+    const automaticIds = new Set(this.cfg.machines.filter((m) => m.allowAutomatic !== false && m.machineId !== failedMachineId).map((m) => m.machineId));
     const { candidates } = await this.gatherCandidates();
-    const ranked = rankCandidates(candidates.filter((c) => c.machine.id !== failedMachineId), ROLE_OF_STAGE[stage], { largestModelBytes: null });
+    const ranked = rankCandidates(candidates.filter((c) => automaticIds.has(c.machine.id)), ROLE_OF_STAGE[stage], { largestModelBytes: null });
     const best = ranked.find((r) => !r.hardBlocked);
     if (!best) return undefined;
     return this.cfg.machines.find((m) => m.machineId === best.candidate.machine.id);

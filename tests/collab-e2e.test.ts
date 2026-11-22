@@ -178,8 +178,8 @@ function makeConfig(stubB: string, stubC: string) {
     autoSteering: true,
     maxTurnsPerStage: 10,
     participants: [
-      { machineId: 'local', machineName: 'Ubuntu Station', baseUrl: stubAUrl, model: 'planner-model', roles: ['planner', 'reviewer'] as any[] },
-      { machineId: peerB, machineName: 'Windows Dell', baseUrl: stubB, model: 'qwen3-coder-30b', roles: ['coder'] as any[] },
+      { machineId: 'local', machineName: 'Ubuntu Station', baseUrl: stubAUrl, model: 'planner-model', roles: ['planner', 'reviewer'] as any[], explicitRun: true },
+      { machineId: peerB, machineName: 'Windows Dell', baseUrl: stubB, model: 'qwen3-coder-30b', roles: ['coder'] as any[], explicitRun: true },
       { machineId: peerC, machineName: 'Ubuntu Portable', baseUrl: stubC, model: 'tester-model', roles: ['tester'] as any[] },
     ],
   };

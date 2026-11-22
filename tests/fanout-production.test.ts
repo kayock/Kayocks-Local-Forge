@@ -97,7 +97,7 @@ function makeConfig(objective: string): CollabTaskConfig {
     workspaceHostPeerId: null,
     workspaceHostMachineName: 'This computer',
     participants: [
-      { machineId: 'local', machineName: 'This computer', baseUrl: 'http://local', model: 'm1', roles: ['planner', 'coder', 'tester', 'reviewer'] as any[], toolProtocol: 'native' as const },
+      { machineId: 'local', machineName: 'This computer', baseUrl: 'http://local', model: 'm1', roles: ['planner', 'coder', 'tester', 'reviewer'] as any[], toolProtocol: 'native' as const, explicitRun: true },
     ],
     executionMode: 'sequential',
     autoSteering: true,
@@ -308,8 +308,8 @@ describe('distributed fan-out across two real companions (HTTP)', () => {
       workspaceHostPeerId: null,
       workspaceHostMachineName: 'Alpha',
       participants: [
-        { machineId: 'local', machineName: 'Alpha', baseUrl: stubBase, model: 'stub', roles: ['planner', 'coder', 'tester', 'reviewer'] as any[], toolProtocol: 'native' as const },
-        { machineId: peerB, machineName: 'Beta', baseUrl: stubBase, model: 'stub', roles: ['coder'] as any[], toolProtocol: 'native' as const },
+        { machineId: 'local', machineName: 'Alpha', baseUrl: stubBase, model: 'stub', roles: ['planner', 'coder', 'tester', 'reviewer'] as any[], toolProtocol: 'native' as const, explicitRun: true },
+        { machineId: peerB, machineName: 'Beta', baseUrl: stubBase, model: 'stub', roles: ['coder'] as any[], toolProtocol: 'native' as const, explicitRun: true },
       ],
       executionMode: 'fanout' as any,
       autoSteering: true,

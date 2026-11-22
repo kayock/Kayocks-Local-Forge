@@ -166,6 +166,14 @@ export class MeshClient {
     return this.req('POST', this.peerPath(peerId, '/api/network/test'), { url });
   }
 
+  async fleetParticipation(): Promise<{ participation: Record<string, 'controller' | 'enabled' | 'manual'> }> {
+    return this.req('GET', '/api/fleet/participation');
+  }
+
+  async setFleetParticipation(machineId: string, mode: 'controller' | 'enabled' | 'manual'): Promise<{ participation: Record<string, 'controller' | 'enabled' | 'manual'> }> {
+    return this.req('PUT', '/api/fleet/participation', { machineId, mode });
+  }
+
   // A peer's Model Manager inventory (scheduler input for remote machines).
   async peerModels(peerId: string): Promise<ModelInventory | null> {
     try {

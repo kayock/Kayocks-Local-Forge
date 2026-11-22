@@ -12,6 +12,7 @@ import * as tasks from './tasks.js';
 import * as coordination from './coordination.js';
 import * as memoryStore from './memory.js';
 import { discoveryStatus } from './discovery.js';
+import { getFleetParticipation, setFleetParticipation } from './fleet.js';
 import { loadModel as legacyLoad, unloadModel as legacyUnload } from './providers.js';
 
 function respond(res, data) { return sendJson(res, data?.status >= 400 ? data.status : 200, data); }
@@ -48,6 +49,12 @@ export async function routeControl(req, res, url, p) {
   if (p === '/api/network' && method === 'GET') { respond(res, mesh.networkSettings()); return true; }
   if (p === '/api/network' && method === 'POST') { respond(res, mesh.setNetwork(await readBody(req, 32*1024))); return true; }
   if (p === '/api/network/test' && method === 'POST') { respond(res, await mesh.networkTest((await readBody(req, 32*1024)).url)); return true; }
+  if (p === '/api/fleet/participation' && method === 'GET') { respond(res, getFleetParticipation()); return true; }
+  if (p === '/api/fleet/participation' && method === 'PUT') {
+    const b = await readBody(req, 8*1024);
+    respond(res, setFleetParticipation(b.machineId, b.mode));
+    return true;
+  }
   if (p === '/api/mesh/status' && method === 'GET') { respond(res, mesh.meshStatus()); return true; }
   if (p === '/api/mesh/discover' && method === 'GET') { respond(res, discoveryStatus()); return true; }
   if (p === '/api/mesh/connect' && method === 'POST') {

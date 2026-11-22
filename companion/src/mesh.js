@@ -126,7 +126,12 @@ export async function peerStatus(id) {
     }
     p.lastStatus = credential ? (hardware ? 'ready' : 'paired-api-unavailable') : 'unpaired';
   } catch { p.lastStatus = 'unreachable'; }
-  if (reachable) p.lastSeenAt = Date.now();
+  if (reachable) {
+    p.lastSeenAt = Date.now();
+    if (health?.version) p.version = health.version;
+    if (health?.platform) p.platform = health.platform;
+    if (health?.buildId) p.buildId = health.buildId;
+  }
   else {
     // Milestone 2 — graceful recovery: a disconnected machine cannot silently
     // keep active tasks. Its active task packets are marked failed so the

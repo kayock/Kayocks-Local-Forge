@@ -84,6 +84,7 @@ function makeRunner(opts: {
   clients: Record<string, CompanionClient>;
   runnerFactory?: any;
   reassignOnFailure?: boolean;
+  machines?: FanoutMachine[];
   onEvent?: (e: AgentEvent & { fanoutKey?: string }) => void;
 }) {
   return new FanoutRunner({
@@ -91,7 +92,7 @@ function makeRunner(opts: {
     workspaceId: 'wsX',
     workspacePath: '/proj',
     mesh: opts.mesh as unknown as MeshClient,
-    machines,
+    machines: opts.machines ?? machines,
     tasks: opts.tasks,
     maxTurnsPerTask: 5,
     reassignOnFailure: opts.reassignOnFailure,
@@ -256,6 +257,28 @@ describe('M2 — FanoutRunner distributed orchestration', () => {
     expect(r2.completed).toBe(1);
     expect(r2.results[0].taskId).toBe(r1.results[0].taskId);
     expect(r2.results[0].turns).toBe(0); // no agent ran again
+  });
+
+  test('a manual machine is not used when the preferred worker fails', async () => {
+    const mesh = new FakeMesh();
+    const windowsPrompts: string[] = [];
+    const clients = {
+      local: fakeCompanion({ failTask: true }),
+      'peer-win': fakeCompanion({ onTask: (t) => windowsPrompts.push(t) }),
+    };
+    const gated: FanoutMachine[] = [
+      { machineId: 'local', name: 'Portable', model: 'small', provider: { kind: 'openai', baseUrl: 'http://127.0.0.1:11434' } as any, allowAutomatic: true },
+      { machineId: 'peer-win', name: 'Windows', model: 'excluded', provider: { kind: 'openai', baseUrl: 'http://127.0.0.1:8080/v1' } as any, allowAutomatic: false },
+    ];
+    const runner = makeRunner({
+      tasks: [{ key: 'no-win', title: 'N', stage: 'coder', prompt: 'N-WORK', machineId: 'local' }],
+      mesh, clients, reassignOnFailure: true, machines: gated,
+    });
+    const report = await runner.run();
+    expect(report.completed).toBe(0);
+    expect(report.failed).toBe(1);
+    expect(windowsPrompts).toHaveLength(0);
+    expect(report.results[0].machineId).not.toBe('peer-win');
   });
 
   test('write reservations are acquired and released around each task', async () => {
