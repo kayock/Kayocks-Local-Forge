@@ -54,6 +54,12 @@ try {
     throw new Error('Native PTY launched but echo output was missing: ' + JSON.stringify(output));
   }
   console.log('PASS: native Windows node-pty shell produced LF_NATIVE_PTY_OK');
+  // On Windows, node-pty/ConPTY can retain native libuv handles even after
+  // onExit fires and the shell exits. The probe has completed all assertions:
+  // terminate the probe process explicitly instead of waiting on those handles
+  // until the GitHub Actions step timeout. The installed-product test separately
+  // verifies live sessions, interrupts, process cleanup, and uninstall.
+  process.exit(0);
 } catch (error) {
   console.error('FAIL: native Windows PTY smoke test:', error);
   process.exit(1);
