@@ -28,6 +28,7 @@ on:
 jobs:
   build-installer:
     runs-on: windows-latest
+    timeout-minutes: 35
     defaults:
       run:
         shell: bash
@@ -47,13 +48,27 @@ jobs:
           choco install nsis mingw -y --no-progress
           echo "C:\Program Files (x86)\NSIS" >> "$GITHUB_PATH"
 
-      - name: Install companion dependencies and verify native Windows PTY
+      - name: Install companion dependencies (bounded, verbose diagnostics)
         working-directory: companion
+        timeout-minutes: 10
         run: |
-          # node-pty 1.1.x may ship Windows prebuilt addons in prebuilds/win32-x64;
-          # a valid installation need not have build/Release.
-          npm install --include=optional --foreground-scripts --no-audit --no-fund 2>&1 | tee npm-install.log
-          node ../installer/windows/assert-native-pty.mjs
+          echo "Starting Windows npm dependency install: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          echo "Node: $(node --version); npm: $(npm --version)"
+          echo "Platform: $(node -p 'process.platform + \"/\" + process.arch')"
+          echo "npm ignore-scripts: $(npm config get ignore-scripts)"
+          echo "Installing optional native PTY module; this step has a strict 10-minute limit."
+          npm install --include=optional --foreground-scripts --no-audit --no-fund --timing --loglevel=verbose 2>&1 | tee npm-install.log
+          echo "Completed npm installation at $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+      - name: Verify native Windows PTY launch (bounded, separate log)
+        working-directory: companion
+        timeout-minutes: 2
+        run: |
+          echo "node-pty native files on disk:"
+          find node_modules/node-pty -type f \\( -name '*.node' -o -name 'package.json' \\) | tee node-pty-paths.log
+          echo "Running real Windows shell PTY smoke test (2-minute job-step limit)"
+          node ../installer/windows/assert-native-pty.mjs 2>&1 | tee pty-probe.log
+          echo "Native Windows PTY probe passed"
 
       - name: Companion test suite on native Windows (includes live PTY)
         working-directory: companion
@@ -89,7 +104,10 @@ jobs:
           rm -rf download/windows/LocalForgeCompanion/pty-sidecar/node-pty
           cp -r companion/node_modules/node-pty download/windows/LocalForgeCompanion/pty-sidecar/node-pty
           test -d download/windows/LocalForgeCompanion/pty-sidecar/node-pty || { echo "FAIL: sidecar staging failed"; exit 1; }
-          ls download/windows/LocalForgeCompanion/pty-sidecar/node-pty/build/Release/
+          # node-pty >=1.1 may use prebuilds/win32-x64 instead of build/Release.
+          echo "Native addons in the actual sidecar payload:"
+          find download/windows/LocalForgeCompanion/pty-sidecar/node-pty -type f -name '*.node' | tee download/windows/staged-pty-addons.log
+          test -s download/windows/staged-pty-addons.log || { echo "FAIL: no native addon in staged sidecar"; exit 1; }
 
       - name: Build the NSIS installer (one authoritative artifact)
         run: |
@@ -114,6 +132,9 @@ jobs:
           name: windows-installer-build-diagnostics
           path: |
             companion/npm-install.log
+            companion/node-pty-paths.log
+            companion/pty-probe.log
+            download/windows/staged-pty-addons.log
             download/windows/payload-hashes.log
           if-no-files-found: ignore
 
@@ -128,6 +149,7 @@ jobs:
 
   verify-installed:
     runs-on: windows-latest
+    timeout-minutes: 20
     needs: build-installer
     defaults:
       run:
