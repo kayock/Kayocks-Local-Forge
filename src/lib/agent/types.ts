@@ -49,12 +49,18 @@ export interface ToolContext {
   };
   fs: {
     listDir: (path?: string) => Promise<{ path: string; type: 'dir' | 'file'; size?: number }[]>;
-    readFile: (path: string) => Promise<{ content: string; size: number }>;
-    writeFile: (path: string, content: string) => Promise<{ bytes: number }>;
+    readFile: (path: string) => Promise<{ content: string; size: number; modifiedAt?: string }>;
+    // opts (Milestone 1): ifUnmodifiedSince implements overwrite protection —
+    // the companion refuses with 409 + current content when the file changed
+    // after the preview; returnDiff asks for a concise post-edit diff.
+    writeFile: (path: string, content: string, opts?: { ifUnmodifiedSince?: string | null; returnDiff?: boolean }) => Promise<{ bytes: number; created?: boolean; modifiedAt?: string; diff?: string; diffAdded?: number; diffRemoved?: number; changedFile?: { path: string; size: number; mtimeMs: number } }>;
     mkdir: (path: string) => Promise<void>;
     deletePath: (path: string) => Promise<void>; // pre-approved by the time a tool runs
     rename: (from: string, to: string) => Promise<void>;
     search: (q: string, opts?: { isRegex?: boolean; glob?: string }) => Promise<{ path: string; line: number; text: string }[]>;
+    // Milestone 1: unified diff preview BEFORE a write is approved. Optional
+    // so mock hosts and older companions degrade to plain writes.
+    diffPreview?: (path: string, content: string) => Promise<{ path: string; exists: boolean; diff: string; added: number; removed: number; truncated: boolean; currentMtime: string | null; previewedBytes: number }>;
     // Forge upgrade — Problem B: distinguish empty from missing. Optional so
     // mock hosts and older companions degrade gracefully.
     stat?: (path: string) => Promise<{ exists: boolean; type?: 'dir' | 'file' | 'other'; empty?: boolean; entryCount?: number; parentExists?: boolean; reason?: string; size?: number }>;
@@ -91,6 +97,13 @@ export interface ToolContext {
 export interface ToolResult {
   output: string;
   isError?: boolean;
+  // Milestone 1: unified diff attached by write/edit tools. Rendered in the
+  // UI (tool card + approval card) but NOT fed to the model with the result —
+  // the model gets the concise confirmation line instead.
+  diff?: string;
+  diffPath?: string;
+  // structured result metadata surfaced to the coordinator/diagnostics
+  changedFile?: string;
 }
 
 export interface ToolDef {
@@ -135,6 +148,12 @@ export interface ToolLogEntry {
   recoveryIssued?: boolean;
   argsTruncated?: boolean;
   argsError?: string;
+  // Milestone 1: unified diff of the change (UI display only), the file it
+  // touches, and the workspace-revision note recorded after FS writes.
+  diff?: string;
+  diffPath?: string;
+  changedFile?: string;
+  workspaceRevision?: string | null;
 }
 
 export type AgentEvent =
@@ -157,7 +176,10 @@ export type AgentEvent =
   // Forge upgrade — Problem D: evidence-gated completion
   | { type: 'completion_gate'; status: CompletionStatus; missing: string[]; detail: string; overridden?: boolean }
   | { type: 'dialect_learned'; dialect: 'native' | 'json' | 'tagged' | 'py'; model: string }
-  | { type: 'usage'; usage: { promptTokens: number | null; completionTokens: number | null } }
+  | { type:'usage'; usage: { promptTokens: number | null; completionTokens: number | null } }
+  // Milestone 1: a file write/edit produced a diff preview (UI renders it;
+  // never fed to the model to keep context lean).
+  | { type: 'diff_preview'; path: string; diff: string; added?: number; removed?: number }
   | { type: 'final'; content: string; turns: number; note?: string; canContinue?: boolean; completion?: CompletionResult }
   | { type: 'stage'; stage: string }
   | { type: 'notice'; message: string };

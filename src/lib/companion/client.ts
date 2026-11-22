@@ -142,8 +142,23 @@ export class CompanionClient {
     return this.req<{ path: string; content: string; size: number; modifiedAt: string }>('GET', `/api/ws/${wsId}/file`, undefined, { path });
   }
 
-  writeFile(wsId: string, path: string, content: string) {
-    return this.req<{ path: string; bytes: number }>('PUT', `/api/ws/${wsId}/file`, { path, content });
+  writeFile(wsId: string, path: string, content: string, opts?: { ifUnmodifiedSince?: string | null; returnDiff?: boolean }) {
+    return this.req<{ path: string; bytes: number; modifiedAt?: string; created?: boolean; changedFile?: { path: string; size: number; mtimeMs: number }; diff?: string; diffAdded?: number; diffRemoved?: number; conflictContent?: string }>('PUT', `/api/ws/${wsId}/file`, {
+      path, content, ifUnmodifiedSince: opts?.ifUnmodifiedSince ?? undefined, returnDiff: opts?.returnDiff === true,
+    });
+  }
+
+  // Milestone 1: unified diff BEFORE a write is approved. Read-only; the
+  // returned currentMtime is echoed back on writeFile to prevent clobbering
+  // concurrent modifications (409 conflict with the on-disk content).
+  diffPreview(wsId: string, path: string, content: string) {
+    return this.req<{ path: string; exists: boolean; diff: string; added: number; removed: number; truncated: boolean; currentMtime: string | null; previewedBytes: number }>('POST', `/api/ws/${wsId}/diff/preview`, { path, content });
+  }
+
+  // Milestone 1: complete output of a recently executed command (tool results
+  // are truncated for the model; the human opens the full log here).
+  execLog(wsId: string, id: string) {
+    return this.req<{ id: string; cmd: string; exitCode: number | null; timedOut: boolean; durMs: number; createdAt: string; stdout: string; stderr: string; truncated: boolean }>('GET', `/api/ws/${wsId}/exec/log`, undefined, { id });
   }
 
   mkdir(wsId: string, path: string) {
@@ -247,6 +262,49 @@ export class CompanionClient {
 
   signalTerm(wsId: string, sessionId: string) {
     return this.req('POST', `/api/ws/${wsId}/term/signal`, { sessionId });
+  }
+
+  // ---- real PTY terminal (Milestone 1) ----
+  // Persistent interactive shell sessions. When the companion lacks node-pty,
+  // ptyCapabilities() reports it and the terminal panel falls back to the
+  // legacy NDJSON streaming shell.
+  ptyCapabilities() {
+    return this.req<{ available: boolean; backend: 'node-pty' | 'unavailable'; reason?: string; fallback: string }>('GET', '/api/pty/capabilities');
+  }
+
+  ptyStart(wsId: string, opts?: { cols?: number; rows?: number; cwd?: string; shell?: string }) {
+    return this.req<{ sessionId: string; shell: string; cwd: string; cols: number; rows: number; backend: string }>('POST', `/api/ws/${wsId}/pty/start`, {
+      cols: opts?.cols, rows: opts?.rows, cwd: opts?.cwd, shell: opts?.shell,
+    });
+  }
+
+  ptyInput(wsId: string, sessionId: string, data: string) {
+    return this.req<{ ok: boolean }>('POST', `/api/ws/${wsId}/pty/input`, { sessionId, data });
+  }
+
+  ptyResize(wsId: string, sessionId: string, cols: number, rows: number) {
+    return this.req<{ ok: boolean }>('POST', `/api/ws/${wsId}/pty/resize`, { sessionId, cols, rows });
+  }
+
+  ptySignal(wsId: string, sessionId: string, signal: string) {
+    return this.req<{ ok: boolean }>('POST', `/api/ws/${wsId}/pty/signal`, { sessionId, signal });
+  }
+
+  ptyStop(wsId: string, sessionId: string) {
+    return this.req<{ stopped: boolean }>('POST', `/api/ws/${wsId}/pty/stop`, { sessionId });
+  }
+
+  ptyList(wsId: string) {
+    return this.req<{ sessions: { sessionId: string; cwd: string; shell: string; exited: boolean; createdAt: number; cols: number; rows: number }[]; capabilities: { available: boolean; backend: string; fallback?: string } }>('GET', `/api/ws/${wsId}/pty/list`);
+  }
+
+  // SSE stream for one PTY session (token via query param — EventSource cannot
+  // set headers; the companion's extractToken already accepts ?token=).
+  ptyOutputStream(wsId: string, sessionId: string, token: string | null): EventSource {
+    const c = this.cfg();
+    const base = c.mode === 'remote' ? (c.remoteUrl || c.directUrl) : c.directUrl;
+    const qs = new URLSearchParams({ sessionId, ...(token ? { token } : {}) });
+    return new EventSource(`${base.replace(/\/+$/, '')}/api/ws/${wsId}/pty/output?${qs.toString()}`);
   }
 
   // ---- detached processes (GUI/desktop apps, dev servers) ----

@@ -91,6 +91,9 @@ export interface RunnerConfig {
   // escalation target for stalls (Problem E): return a replacement
   // provider/model, or null when none is configured
   escalateTo?: () => { provider: ProviderConfig; model: string; label: string } | null;
+  // Milestone 1: workspace revision lookup for tool results. Optional; when
+  // absent, FS-write results carry the per-file mtime fingerprint only.
+  fetchWorkspaceRevision?: () => Promise<string | null>;
   // coordinator hook: fired whenever the runner escalates, so the handoff is
   // recorded in the coordinator's report (Problem A/E bookkeeping)
   onEscalation?: (esc: { kind: string; message: string; tool?: string }) => void;
@@ -136,6 +139,9 @@ export interface RunResult {
   paused?: boolean;
   // Forge upgrade — Problem D: coordinator verdict, not the model's claim
   completion?: CompletionResult;
+  // Milestone 1: files this run actually wrote/edited (structured result)
+  filesChanged: string[];
+  usage?: { promptTokens: number | null; completionTokens: number | null };
 }
 
 interface JournalEntry {
@@ -170,6 +176,8 @@ export class AgentRunner {
   private gateRefusals = 0;
   private lastCompletion: CompletionResult | undefined;
   private lastEscalatedTo: string | null = null;
+  // Milestone 1: cumulative token usage for the run (from usage events)
+  private usageTotal: { promptTokens: number | null; completionTokens: number | null } = { promptTokens: null, completionTokens: null };
 
   constructor(private cfg: RunnerConfig) {
     this.protocol = normalizeProtocolMode(cfg.toolProtocol);
@@ -177,6 +185,10 @@ export class AgentRunner {
   }
 
   private emit(e: AgentEvent) {
+    if (e.type === 'usage') {
+      if (e.usage.promptTokens != null) this.usageTotal.promptTokens = (this.usageTotal.promptTokens ?? 0) + e.usage.promptTokens;
+      if (e.usage.completionTokens != null) this.usageTotal.completionTokens = (this.usageTotal.completionTokens ?? 0) + e.usage.completionTokens;
+    }
     this.cfg.onEvent(e);
   }
 
@@ -245,9 +257,12 @@ export class AgentRunner {
         },
         readFile: async (p) => {
           const f = await companion.readFile(workspaceId, p);
-          return { content: f.content, size: f.size };
+          return { content: f.content, size: f.size, modifiedAt: (f as any).modifiedAt };
         },
-        writeFile: async (p, c) => companion.writeFile(workspaceId, p, c),
+        writeFile: async (p, c, opts) => companion.writeFile(workspaceId, p, c, opts),
+        // Milestone 1: diff preview BEFORE approving a write (companion-side
+        // unified diff against the file on disk).
+        diffPreview: (companion as any).diffPreview ? async (p: string, content: string) => (companion as any).diffPreview(workspaceId, p, content) : undefined,
         mkdir: async (p) => { await companion.mkdir(workspaceId, p); },
         deletePath: async (p) => { await companion.deletePath(workspaceId, p, true); },
         rename: async (a, b) => { await companion.rename(workspaceId, a, b); },
@@ -398,6 +413,14 @@ export class AgentRunner {
       const res = await def.run(args, ctx);
       entry.status = res.isError ? 'error' : 'ok';
       entry.output = entry.output ? `${entry.output}\n${res.output}` : res.output;
+      // Milestone 1: structured results — attached diff, changed file, and a
+      // workspace-revision note on FS writes (fetched only when wired).
+      if (res.diff) {
+        entry.diff = res.diff;
+        entry.diffPath = res.diffPath;
+        this.emit({ type: 'diff_preview', path: res.diffPath || String(args.path ?? ''), diff: res.diff, added: (res as any).diffAdded, removed: (res as any).diffRemoved });
+      }
+      if (res.changedFile) entry.changedFile = res.changedFile;
       // Part 2 structured execution feedback + workspace version tracking.
       // Only deterministic FS writers bump the workspace version: a command
       // does not count as a change by itself, otherwise re-running an
@@ -407,11 +430,25 @@ export class AgentRunner {
       if (FS_WRITERS.has(name)) {
         entry.fsChanged = true;
         this.workspaceVersion++;
-        if (name === 'write_file') this.filesWritten.add(String(args.path ?? ''));
+        if (name === 'write_file' || name === 'edit_file') {
+          const p = String(args.path ?? res.changedFile ?? '');
+          if (p) this.filesWritten.add(canonRelPath(p));
+        }
         if (name === 'extract_archive') {
           const dest = canonRelPath(args.dest ?? '.');
           const nested = (res.output.match(/nested project root "([^"]+)"/) || [])[1];
           this.filesWritten.add(nested && (args.flatten === true || args.flatten === 'true') ? dest : `${dest}/${nested ?? ''}`.replace(/\/$/, ''));
+        }
+        // Milestone 1: workspace revision in relevant tool results. Fetched
+        // lazily and never allowed to break the tool result on failure.
+        if (this.cfg.fetchWorkspaceRevision) {
+          try {
+            const rev = await this.cfg.fetchWorkspaceRevision();
+            if (rev) {
+              entry.workspaceRevision = rev.slice(0, 12);
+              entry.output = `${entry.output}\nworkspace revision: ${rev.slice(0, 12)}`;
+            }
+          } catch { /* revision lookup is best-effort */ }
         }
       } else if (FS_MAYBE_WRITERS.has(name)) {
         entry.fsChanged = true; // commands may modify the workspace (metadata only)
@@ -859,7 +896,7 @@ export class AgentRunner {
     }
 
     this.emit({ type: 'final', content: finalContent, turns: turn, note: finalNote, canContinue: hitTurnLimit || paused, completion: this.lastCompletion });
-    return { content: finalContent, turns: turn, note: finalNote, messages: this.messages, hitTurnLimit, paused, completion: this.lastCompletion };
+    return { content: finalContent, turns: turn, note: finalNote, messages: this.messages, hitTurnLimit, paused, completion: this.lastCompletion, filesChanged: [...this.filesWritten], usage: this.usageTotal };
   }
 
   // finish handling with the completion gate (Problem D). Returns accepted +

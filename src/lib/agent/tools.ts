@@ -323,7 +323,7 @@ export const CORE_TOOLS: ToolDef[] = [
   },
   {
     name: 'write_file',
-    description: 'Create or overwrite a text file in the workspace. Parent directories are created automatically.',
+    description: 'Create or overwrite a text file in the workspace. Parent directories are created automatically. A unified diff of the change is generated before the write; concurrent modifications made after the diff are refused instead of overwritten.',
     danger: 'safe',
     params: [
       { name: 'path', type: 'string', description: 'File path relative to workspace root', required: true },
@@ -333,8 +333,39 @@ export const CORE_TOOLS: ToolDef[] = [
       const p = canonRelPath(args.path);
       const content = typeof args.content === 'string' ? args.content : String(args.content ?? '');
       ctx.assertEditable?.(p);
-      const r = await ctx.fs.writeFile(p, content);
-      return { output: `Wrote ${p} (${r.bytes} bytes).` };
+      // Milestone 1: preview the diff BEFORE writing (best-effort; mock hosts
+      // and older companions without the endpoint just skip it).
+      let diff: string | undefined;
+      let mtime: string | null = null;
+      if (ctx.fs.diffPreview) {
+        try {
+          const pv = await ctx.fs.diffPreview(p, content);
+          diff = pv.diff ? (pv.truncated ? pv.diff + '\n…[diff truncated]' : pv.diff) : undefined;
+          mtime = pv.currentMtime;
+        } catch (e: any) {
+          if (e?.status === 415 || e?.status === 400) return { output: `Cannot write ${p}: ${summarizeError(e)}`, isError: true };
+          // other preview failures are non-fatal — proceed with a plain write
+        }
+      }
+      try {
+        const r = await ctx.fs.writeFile(p, content, { ifUnmodifiedSince: mtime });
+        const stat = r.created ? 'created' : `updated (+${r.diffAdded ?? '?'} / -${r.diffRemoved ?? '?'} lines)`;
+        return {
+          output: `Wrote ${p} (${r.bytes} bytes, ${stat}).`,
+          diff,
+          diffPath: p,
+          changedFile: p,
+        };
+      } catch (e: any) {
+        // Overwrite protection fired: hand the model the CURRENT content so it
+        // re-previews instead of clobbering newer work.
+        const conflict = e?.payload?.conflict;
+        if (conflict || /changed on disk after the diff was previewed/i.test(String(e?.message || e))) {
+          const cur = conflict?.currentContent != null ? conflict.currentContent.slice(0, 2000) : '(content unavailable — re-read the file)';
+          return { output: `CONFLICT: "${p}" changed after your diff was previewed — your write was REFUSED to avoid overwriting newer work. Current content (first 2000 chars):\n${cur}\nRe-read the file, integrate the newer changes, and write again.`, isError: true };
+        }
+        throw e;
+      }
     },
   },
   {
@@ -369,8 +400,31 @@ export const CORE_TOOLS: ToolDef[] = [
         return { output: `Error: "find" appears ${count} times in ${p}. Provide more surrounding context or set replaceAll:true.`, isError: true };
       }
       const next = all ? f.content.split(find).join(replace) : f.content.replace(find, replace);
-      await ctx.fs.writeFile(p, next);
-      return { output: `Edited ${p} (replaced ${all ? count : 1} occurrence(s)).` };
+      // Milestone 1: diff preview BEFORE the edit is applied + overwrite
+      // protection via the file's last-modified time read moments ago.
+      let diff: string | undefined;
+      if (ctx.fs.diffPreview) {
+        try {
+          const pv = await ctx.fs.diffPreview(p, next);
+          diff = pv.diff ? (pv.truncated ? pv.diff + '\n…[diff truncated]' : pv.diff) : undefined;
+        } catch { /* preview is best-effort */ }
+      }
+      try {
+        const r = await ctx.fs.writeFile(p, next, { ifUnmodifiedSince: f.modifiedAt ?? null, returnDiff: true });
+        return {
+          output: `Edited ${p} (replaced ${all ? count : 1} occurrence(s), diff: +${r.diffAdded ?? 0} / -${r.diffRemoved ?? 0} lines).`,
+          diff: diff ?? r.diff,
+          diffPath: p,
+          changedFile: p,
+        };
+      } catch (e: any) {
+        const conflict = e?.payload?.conflict;
+        if (conflict || /changed on disk after the diff was previewed/i.test(String(e?.message || e))) {
+          const cur = conflict?.currentContent != null ? conflict.currentContent.slice(0, 2000) : '(content unavailable — re-read the file)';
+          return { output: `CONFLICT: "${p}" changed after you read it — the edit was REFUSED to avoid overwriting newer work. Current content (first 2000 chars):\n${cur}\nRe-read the file and retry with a snippet from the CURRENT content.`, isError: true };
+        }
+        throw e;
+      }
     },
   },
   {

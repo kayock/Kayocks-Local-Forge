@@ -243,7 +243,7 @@ export class Coordinator {
     if (this.stopRequested) {
       assignment.status = 'cancelled';
       await this.persistAssignment(assignment);
-      return { r: { content: '', turns: 0, messages: [], hitTurnLimit: false, paused: true, note: 'Stopped by user before start.' } as RunResult, assignment, conflict: null };
+      return { r: { content: '', turns: 0, messages: [], hitTurnLimit: false, paused: true, note: 'Stopped by user before start.', filesChanged: [] } as RunResult, assignment, conflict: null };
     }
     const events: AgentEvent[] = [];
     const runner = new AgentRunner({

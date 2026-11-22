@@ -9,6 +9,30 @@ const OUTPUT_CAP = 400 * 1024; // per stream
 const DEFAULT_TIMEOUT = 180_000;
 const MAX_TIMEOUT = 600_000;
 
+// ---- complete-command-log ring (Milestone 1) ----
+// Tool results are intelligently truncated for the model, but nothing should
+// be lost for the human: the full stdout/stderr of recent commands is kept in
+// a bounded ring and served at GET /api/ws/<id>/exec/log?id=...
+const FULL_LOG_CAP = 2 * 1024 * 1024;   // per exec
+const EXEC_LOG_HISTORY = 20;
+const execLogs = new Map(); // execId -> { id, cmd, cwd, exitCode, timedOut, durMs, createdAt, stdout, stderr, truncated }
+let execSeq = 0;
+
+function recordExecLog(info) {
+  const id = `exec_${Date.now().toString(36)}_${++execSeq}`;
+  const rec = { id, ...info };
+  execLogs.set(id, rec);
+  while (execLogs.size > EXEC_LOG_HISTORY) {
+    execLogs.delete(execLogs.keys().next().value);
+  }
+  return id;
+}
+
+export function getExecLog(id) {
+  return execLogs.get(String(id)) || null;
+}
+export { recordExecLog, FULL_LOG_CAP };
+
 // Never executes, regardless of confirm.
 const HARD_DENY = [
   /\bmkfs(\.\w+)?\b/,
@@ -150,6 +174,13 @@ export function runCommand({ cmd, cwd, timeoutMs, onChunk, sessionId, registry }
       const stripMarker = (s) => s.split('\n').filter((l) => !l.includes('__LF_EOF')).join('\n');
       const stdout = stripMarker(rawStdout);
       const stderr = stripMarker(err.toString('utf8'));
+      const execId = recordExecLog({
+        cmd, cwd, exitCode: exitCode ?? null, timedOut, durMs: Date.now() - started,
+        createdAt: new Date().toISOString(),
+        stdout: stdout.slice(0, FULL_LOG_CAP),
+        stderr: stderr.slice(0, FULL_LOG_CAP),
+        truncated: stdout.length > FULL_LOG_CAP || stderr.length > FULL_LOG_CAP,
+      });
       if (!settled) {
         settled = true;
         resolve({
@@ -161,6 +192,7 @@ export function runCommand({ cmd, cwd, timeoutMs, onChunk, sessionId, registry }
           truncatedErr: errTrunc,
           stdout,
           stderr,
+          execLogId: execId,
         });
       }
     });

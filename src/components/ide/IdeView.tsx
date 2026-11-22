@@ -40,6 +40,7 @@ import { useRuns } from '@/lib/store/runs';
 import { useProjects } from '@/lib/store/projects';
 import { useRouter } from '@/lib/store/router';
 import { useAuth } from '@/lib/store/auth';
+import { useMesh } from '@/lib/store/mesh';
 import { AgentRunner } from '@/lib/agent/runner';
 import { PipelineRunner } from '@/lib/agent/orchestrator';
 import { agentSystemPrompt, type WorkspaceContext } from '@/lib/agent/prompts';
@@ -366,6 +367,11 @@ export function IdeView() {
                       status: e.entry.status,
                       output: e.entry.output,
                       durMs: e.entry.endedAt ? e.entry.endedAt - e.entry.startedAt : undefined,
+                      // Milestone 1: structured write/edit results
+                      diff: e.entry.diff,
+                      diffPath: e.entry.diffPath,
+                      changedFile: e.entry.changedFile,
+                      workspaceRevision: e.entry.workspaceRevision ?? undefined,
                     },
                   }
                 : m
@@ -409,6 +415,13 @@ export function IdeView() {
       }
       if (e.type === 'stall_detected') {
         runs.addOp(runId, { kind: 'recovery', summary: e.message.slice(0, 200), status: 'blocked' });
+        return;
+      }
+      if (e.type === 'diff_preview') {
+        // Milestone 1: file writes/edits show a diff in the timeline (the full
+        // unified diff lives on the tool card; the op carries the summary).
+        const first = e.diff.split('\n').find((l) => l.startsWith('@@')) || '';
+        runs.addOp(runId, { kind: 'tool', tool: 'diff', summary: `diff: ${e.path} ${first.slice(0, 120)}`, status: 'ok', detail: e.diff.slice(0, 4000) });
         return;
       }
       if (e.type === 'escalation') {
@@ -517,6 +530,22 @@ export function IdeView() {
           workspaceMeta,
           contract: contract ?? undefined,
           onContractUpdate: persistContract,
+          // Milestone 1: surface the workspace revision in FS-write tool
+          // results (cached briefly — the revision walks the whole workspace).
+          fetchWorkspaceRevision: (() => {
+            let cached: { rev: string; at: number } | null = null;
+            const wsId = String(ws.workspaceId || '');
+            return async () => {
+              if (!wsId) return null;
+              if (cached && Date.now() - cached.at < 10_000) return cached.rev;
+              try {
+                const mc = useMesh.getState().client();
+                const r = await mc.workspaceRevision(wsId);
+                cached = { rev: r.revision, at: Date.now() };
+                return r.revision;
+              } catch { return null; }
+            };
+          })(),
           onDialectLearned: (dialect, model) => settings.recordModelDialect(activeProviderCfg.baseUrl, model, dialect),
           escalateTo: escalateTarget,
           companionBrowser: {

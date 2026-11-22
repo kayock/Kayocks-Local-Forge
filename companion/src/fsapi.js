@@ -122,7 +122,7 @@ export async function readFileContent(ws, relPath) {
   return { path: relPath, content, size: st.size, modifiedAt: st.mtime.toISOString() };
 }
 
-export async function writeFileContent(ws, relPath, content, { createDirs = true } = {}) {
+export async function writeFileContent(ws, relPath, content, { createDirs = true, ifUnmodifiedSince = null, returnDiff = false } = {}) {
   const abs = resolveInWorkspace(ws, relPath);
   await assertInsideReal(ws, abs);
   if (typeof content !== 'string') throw new FsError(400, 'content must be a string');
@@ -137,12 +137,77 @@ export async function writeFileContent(ws, relPath, content, { createDirs = true
       throw new FsError(400, `${relPath} is a non-empty directory; delete it before writing a file there.`);
     }
   }
+  // Overwrite protection (Milestone 1): when the caller previews a diff and
+  // then writes, it passes the mtime it previewed against. If the file changed
+  // in between (another agent, the user, a build step), refuse with 409 and
+  // the CURRENT content so the caller re-previews instead of clobbering.
+  let previousContent = null;
+  if (st && st.isFile() && ifUnmodifiedSince !== null) {
+    const previewMtime = Date.parse(ifUnmodifiedSince);
+    if (!Number.isFinite(previewMtime)) throw new FsError(400, 'ifUnmodifiedSince must be an ISO timestamp');
+    if (st.mtimeMs > previewMtime + 1) {
+      const current = await fsp.readFile(abs, 'utf8').catch(() => null);
+      throw conflictError(relPath, current);
+    }
+  }
+  if (st && st.isFile()) {
+    try { previousContent = await fsp.readFile(abs, 'utf8'); } catch { previousContent = null; }
+  }
   const dir = path.dirname(abs);
   if (createDirs) await fsp.mkdir(dir, { recursive: true });
   await assertInsideReal(ws, abs);
   await fsp.writeFile(abs, content, 'utf8');
   const st2 = await fsp.stat(abs);
-  return { path: relPath, bytes: st2.size };
+  const result = { path: relPath, bytes: st2.size, modifiedAt: st2.mtime.toISOString(), created: !st, changedFile: { path: relPath, size: st2.size, mtimeMs: st2.mtimeMs } };
+  if (returnDiff) {
+    // Concise diff after successful edits (Milestone 1). Bounded so a whole-file
+    // rewrite cannot flood the tool result.
+    const { unifiedDiff } = await import('./diff.js');
+    const d = unifiedDiff(previousContent ?? '', content, { from: `a/${relPath}`, to: `b/${relPath}`, maxHunks: 12 });
+    result.diff = d.truncated ? d.diff + `\n…[diff truncated — ${d.added} added / ${d.removed} removed lines shown partially]` : d.diff;
+    result.diffAdded = d.added;
+    result.diffRemoved = d.removed;
+  }
+  return result;
+}
+
+function conflictError(relPath, currentContent) {
+  const e = new FsError(409, `"${relPath}" changed on disk after the diff was previewed (concurrent modification). Re-preview before writing to avoid overwriting newer work.`);
+  e.conflict = { path: relPath, currentContent: currentContent === null ? null : String(currentContent).slice(0, 64 * 1024), contentTruncated: currentContent !== null && currentContent.length > 64 * 1024 };
+  return e;
+}
+
+// Diff preview BEFORE a write (Milestone 1): returns a unified diff of the
+// proposed content against the file on disk, plus the file's current mtime —
+// the caller echoes it back as ifUnmodifiedSince on the real write.
+export async function previewDiff(ws, relPath, proposedContent) {
+  const abs = resolveInWorkspace(ws, relPath);
+  await assertInsideReal(ws, abs);
+  if (typeof proposedContent !== 'string') throw new FsError(400, 'content must be a string');
+  const st = await fsp.stat(abs).catch(() => null);
+  if (st && st.isDirectory()) throw new FsError(400, `${relPath} is a directory; diff needs a file path.`);
+  let current = '';
+  let exists = false;
+  if (st && st.isFile()) {
+    if (st.size > 2 * 1024 * 1024) throw new FsError(400, `File too large to diff (>2MB): ${relPath}`);
+    const { isBinary } = classify(abs);
+    if (isBinary) throw new FsError(415, `Binary file (diff unsupported): ${relPath}`);
+    current = await fsp.readFile(abs, 'utf8');
+    exists = true;
+  }
+  const { unifiedDiff } = await import('./diff.js');
+  const d = unifiedDiff(exists ? current : '', proposedContent, { from: `a/${relPath}`, to: `b/${relPath}`, maxHunks: 40 });
+  return {
+    path: relPath,
+    exists,
+    diff: d.diff,
+    added: d.added,
+    removed: d.removed,
+    truncated: d.truncated,
+    // echo this back on write to guarantee the previewed version is applied
+    currentMtime: exists ? st.mtime.toISOString() : null,
+    previewedBytes: Buffer.byteLength(proposedContent, 'utf8'),
+  };
 }
 
 // Append text to a file (large-file assembly, tool-call repair mission).

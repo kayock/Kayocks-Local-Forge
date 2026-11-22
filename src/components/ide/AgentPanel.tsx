@@ -18,7 +18,35 @@ import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useAgent, type ChatMessageView } from '@/lib/store/agent';
 import { useSettings } from '@/lib/store/settings';
-import { CheckCircle2, ChevronDown, ChevronRight, Loader2, Play, Send, ShieldCheck, Square, XCircle, Wrench, User, Bot, Workflow, Flag } from 'lucide-react';
+import { CheckCircle2, ChevronDown, ChevronRight, GitCompare, Loader2, Play, Send, ShieldCheck, Square, XCircle, Wrench, User, Bot, Workflow, Flag } from 'lucide-react';
+
+function DiffView({ diff, path }: { diff: string; path?: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const lines = diff.split('\n');
+  const shown = expanded ? lines : lines.slice(0, 40);
+  return (
+    <div className="rounded border border-white/10 overflow-hidden" data-diff-preview={path || ''}>
+      <div className="flex items-center gap-2 px-2 py-1 bg-emerald-500/10 text-[10px] text-emerald-300">
+        <GitCompare className="w-3 h-3" />
+        <span className="font-medium">unified diff{path ? ` — ${path}` : ''}</span>
+        <span className="text-emerald-400/70">{lines.filter((l) => l.startsWith('+') && !l.startsWith('+++')).length}+ / {lines.filter((l) => l.startsWith('-') && !l.startsWith('---')).length}-</span>
+        {lines.length > 40 && !expanded && (
+          <button className="ml-auto underline" onClick={() => setExpanded(true)}>show all {lines.length} lines</button>
+        )}
+      </div>
+      <pre className="font-mono text-[10px] leading-tight bg-black/40 p-1.5 overflow-x-auto lf-scroll max-h-64 whitespace-pre">
+        {shown.map((l, i) => (
+          <div key={i} className={
+            l.startsWith('+') && !l.startsWith('+++') ? 'text-emerald-400 bg-emerald-500/10'
+            : l.startsWith('-') && !l.startsWith('---') ? 'text-red-400 bg-red-500/10'
+            : l.startsWith('@@') ? 'text-violet-300'
+            : 'text-zinc-400'
+          }>{l || ' '}</div>
+        ))}
+      </pre>
+    </div>
+  );
+}
 
 function ToolCard({ msg }: { msg: ChatMessageView }) {
   const [open, setOpen] = useState(false);
@@ -33,13 +61,22 @@ function ToolCard({ msg }: { msg: ChatMessageView }) {
         {status === 'denied' && <XCircle className="w-3.5 h-3.5 text-yellow-500 shrink-0" />}
         <span className="font-medium flex items-center gap-1.5"><Wrench className="w-3 h-3 text-muted-foreground" />{entry?.tool || msg.toolCallId}</span>
         <span className="text-muted-foreground truncate">{entry?.summary}</span>
+        {entry?.diff && <Badge variant="outline" className="text-[9px] text-emerald-400 border-emerald-500/40 shrink-0">diff</Badge>}
         <span className="ml-auto text-muted-foreground shrink-0">{entry?.durMs != null ? `${(entry.durMs / 1000).toFixed(1)}s` : ''}</span>
         {open ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
       </button>
       {open && (
         <div className="px-2.5 pb-2 space-y-1.5">
           {entry?.argsPreview && <pre className="font-mono text-[10px] text-muted-foreground bg-muted/50 rounded p-1.5 overflow-x-auto">{entry.argsPreview}</pre>}
+          {entry?.diff && <DiffView diff={entry.diff} path={entry.diffPath} />}
           {entry?.output && <pre className="font-mono text-[10px] bg-muted/50 rounded p-1.5 overflow-x-auto max-h-48 lf-scroll whitespace-pre-wrap">{entry.output.slice(0, 4000)}</pre>}
+          {(entry?.changedFile || entry?.workspaceRevision) && (
+            <div className="text-[10px] text-muted-foreground">
+              {entry?.changedFile && <span>changed: <span className="font-mono">{entry.changedFile}</span></span>}
+              {entry?.changedFile && entry?.workspaceRevision && <span className="mx-1">·</span>}
+              {entry?.workspaceRevision && <span>workspace revision <span className="font-mono">{entry.workspaceRevision}</span></span>}
+            </div>
+          )}
         </div>
       )}
     </div>
