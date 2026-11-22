@@ -1,5 +1,57 @@
 # Changelog
 
+## v0.5.0 RC4 — critical integration & Windows installer hotfix (v0.5-dev, 2026-11-22)
+
+Four confirmed RC3 defects repaired (commits e258503, aed8467):
+
+1. **Distributed fan-out actually executes from the UI.** ControlCenter.start
+   now calls the new production dispatcher `startCollabRun()`: mode 'fanout'
+   → `runDistributedFanout` (planner graph → FanoutRunner → mesh packets →
+   agents on their machines); sequential/pipeline unchanged. A control
+   adapter maps Pause/Stop/Steer onto both engines; fan-out reports are
+   normalized into the coordinator report shape (verdict/turns/conflicts +
+   fanout task counts). `FanoutRunner` gained `pauseAll()`/`steerAll()` for
+   the UI lifecycle. tests/fanout-production.test.ts was REWRITTEN: the
+   tests invoke `startCollabRun` itself (no source-text greps) — fanout mode
+   creates and completes real mesh task packets while sequential mode
+   creates none, JSON fallback + invalid-graph recovery run through the same
+   dispatcher, and a genuine TWO-COMPANION flow over HTTP (real companions,
+   pairing, mesh-connect, workspace) dispatches one graph task to the peer,
+   which executes it remotely through the authoritative host's mesh proxy
+   with streamed progress and recorded results.
+
+2. **Windows PTY sidecar is built FOR Windows.** The authoritative installer
+   is now produced on a windows-latest runner: `npm install` compiles
+   node-pty against the Windows ABI (pty.node asserted before packaging),
+   the Companion suite incl. live PTY tests must pass on native Windows
+   BEFORE packaging, and the Windows-built sidecar is staged into the NSIS
+   payload. The Linux cross-build script remains for local previews only
+   (header now states this explicitly).
+
+3. **Installer workflow compiles the correct entry point and fails honestly.**
+   `installer/windows/entry-companion.ts` (the nonexistent
+   companion/entry-windows.ts removed); every `continue-on-error`/`|| true`
+   on mandatory steps removed; ONE authoritative artifact is uploaded with
+   SHA256SUMS.txt; the verification job downloads THAT artifact, verifies
+   the hash BEFORE installing, silent-installs it, and runs the committed
+   `installer/windows/verify-installed.mjs` probe against the installed
+   product: installed files (incl. native .node), Start Menu shortcut target
+   resolution, installed exe serving /health, native node-pty backend via
+   /api/pty/capabilities, a REAL PowerShell session (visible output, cwd and
+   env persistence across separate inputs, resize, Ctrl+C recovery, stop +
+   cleanup), uninstall removal, best-effort tray launch reported honestly.
+   Diagnostics upload always; installer explicitly labeled UNSIGNED.
+
+4. **Tray executable paths agree with the installed layout.** Finish-page
+   launch, Start Menu shortcut, desktop shortcut and the autorun registry
+   value now reference `$INSTDIR\LocalForgeCompanion\LocalForgeTray.exe`
+   (previously missing the LocalForgeCompanion segment); uninstall was
+   already correct and is unchanged; tray_main.c resolves the companion
+   relative to its own directory (verified consistent).
+
+Regression: Companion 57/57 · Bun 151 tests / 0 fail · tsc 0 errors ·
+production build success. No tests weakened; no behavior removed.
+
 ## v0.5.0 RC3 — Cline-class engineering (v0.5-dev, 2026-11-22)
 
 Release blockers repaired:
