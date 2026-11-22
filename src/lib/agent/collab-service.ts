@@ -513,7 +513,7 @@ export async function runDistributedFanout(
     ? validation2.tasks
     : [
         { key: 'impl', title: 'Implement the objective', stage: 'coder', prompt: cfg.objective, dependsOn: [], contextFiles: [], requirements: contract.requirements.filter((r) => r.source === 'user').map((r) => r.text) },
-        { key: 'verify', title: 'Verify the implementation', stage: 'tester', prompt: `Verify the work completed for: ${cfg.objective}. Run the project's tests/build, fix trivial failures, and report evidence.`, dependsOn: ['impl'], contextFiles: [], requirements: ['verification evidence exists'] },
+        { key: 'verify', title: 'Verify the implementation', stage: 'tester', prompt: `Verify the work completed for: ${cfg.objective}. Run the project's tests or build, record the command, exit code, and output, and report failures for the coder. Do not rewrite application files.`, dependsOn: ['impl'], contextFiles: [], requirements: ['verification evidence exists'] },
       ];
 
   // 2) FanoutRunner executes the graph across the participating machines
