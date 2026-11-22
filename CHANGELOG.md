@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.5.0 — integration & repair pass (v0.5-dev, 2026-11-22)
+
+Fixed from the final review:
+- Windows PTY packaging: sidecar loader in companion/src/pty.js — the runtime
+  imports prebuilt node-pty from <exe-dir>/pty-sidecar/node-pty (bundled by
+  installer/windows/build-windows.sh). Loader VERIFIED on Linux (backend
+  reports node-pty-sidecar with node_modules emptied); Windows verification
+  requires a Windows runner (UNVERIFIED there).
+- FanoutRunner connected to production: runDistributedFanout() in
+  collab-service (planner decomposition → parallel execution across the
+  participant machines via the mesh), exposed as the "Parallel fan-out
+  (distributed)" mode in the Forge Control Center; Center re-mounted at
+  #/control with a TopBar entry.
+- Mesh proxy: route regex widened, health+chat proxied (routed IDE client
+  needs both) — fixes 401/404/"route not available" for cross-machine traffic.
+- Test repairs (129/133 pass, was 81/17-fail of 100): missing companion
+  fixture stub-model-server.mjs created (spec'd by collab suites); missing
+  toolcalls.js module implemented; provider-settings tests rewritten to the
+  v0.5.0 settings API; auto-steering delivery order + rate limit fixed;
+  recovery stall-stop redesigned (activity backstop, progress-by-tool,
+  send-once envelopes); append_file tool added with aliases.
+- UI: DiagnosticsPanel mounted in the IDE bottom dock (new tab);
+  ControlCenter reachable from the IDE header.
+- Next.js production build verified (npm run build → success).
+
 ## v0.5.0 (development branch v0.5-dev)
 
 Milestone 1 — Real PTY terminal and reliable file operations

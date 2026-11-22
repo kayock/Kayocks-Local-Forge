@@ -22,13 +22,51 @@ import path from 'node:path';
 import { config, findWorkspace } from './config.js';
 import { log } from './config.js';
 
-// Optional dependency, loaded lazily like `ws` in server.js.
+// Optional dependency, loaded lazily like `ws` in server.js. When the plain
+// import fails (e.g. inside the standalone compiled Windows binary that cannot
+// bundle native modules), a PACKAGED SIDECAR is used: the installer ships the
+// prebuilt node-pty package next to the executable
+//   <exe-dir>/pty-sidecar/node-pty/...
+// (see installer/windows/build-windows.sh — 'pty-sidecar' step) and we import
+// it from that absolute path at runtime. This is what makes the REAL PTY
+// terminal work in the normal installed Windows application without requiring
+// Node.js or build tools on the user's machine.
 let pty = null;
 let ptyLoadError = null;
+let ptyBackend = 'node-pty';
 try {
   pty = (await import('node-pty')).default ?? (await import('node-pty'));
 } catch (e) {
   ptyLoadError = String(e?.message || e).slice(0, 200);
+  // --- sidecar fallback (Windows installer layout + explicit env override) ---
+  const fsx = await import('node:fs');
+  const pathx = await import('node:path');
+  const candidates = [];
+  if (process.env.LOCALFORGE_PTY_SIDECAR) candidates.push(process.env.LOCALFORGE_PTY_SIDECAR);
+  try {
+    const exeDir = pathx.dirname(process.execPath);
+    candidates.push(pathx.join(exeDir, 'pty-sidecar', 'node-pty'));
+    candidates.push(pathx.join(exeDir, 'resources', 'pty-sidecar', 'node-pty'));
+  } catch { /* execPath unavailable (rare) */ }
+  // repo/dev layout: sibling sidecar next to companion/src
+  try { candidates.push(pathx.join(pathx.dirname(new URL(import.meta.url).pathname), '..', 'pty-sidecar', 'node-pty')); } catch { /* ignore */ }
+  for (const dir of candidates) {
+    try {
+      if (!dir || !fsx.existsSync(pathx.join(dir, 'package.json'))) continue;
+      // resolve the package's entry file — ESM cannot import a bare directory
+      const pkg = JSON.parse(fsx.readFileSync(pathx.join(dir, 'package.json'), 'utf8'));
+      const entry = pkg.main ? pathx.join(dir, pkg.main) : pathx.join(dir, 'lib', 'index.js');
+      if (!fsx.existsSync(entry)) continue;
+      const mod = await import(pathx.resolve(entry));
+      pty = mod.default ?? mod;
+      ptyLoadError = null;
+      ptyBackend = 'node-pty-sidecar';
+      log('pty_sidecar_loaded', { dir });
+      break;
+    } catch (e2) {
+      ptyLoadError = `sidecar ${dir}: ${String(e2?.message || e2).slice(0, 120)}`;
+    }
+  }
 }
 
 const SCROLLBACK_BYTES = 256 * 1024;
@@ -50,7 +88,7 @@ export function ptyCapabilities() {
   if (!pty) return unavailablePayload();
   return {
     available: true,
-    backend: 'node-pty',
+    backend: ptyBackend,
     fallback: 'ndjson-stream',
   };
 }

@@ -52,6 +52,9 @@ export function TopBar({
       <div className="flex-1" />
 
       {/* Forge Control: projects / fleet / live runs */}
+      <Button variant="outline" size="sm" className="h-8 gap-1.5" onClick={() => navigate('control')} title="Forge Control Center — multi-agent collaboration, parallel fan-out across machines">
+        <Network className="w-3.5 h-3.5" /> Control Center
+      </Button>
       <Button variant="outline" size="sm" className="h-8 gap-1.5" onClick={() => navigate('forge')} title="Forge Control — Projects Hub, Fleet Map, Live Runs">
         <Network className="w-3.5 h-3.5 text-primary" />
         <span className="hidden md:inline text-xs">Forge</span>

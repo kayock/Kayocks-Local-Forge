@@ -16,7 +16,7 @@ import { useMesh } from '@/lib/store/mesh';
 import { useWorkspace } from '@/lib/store/workspace';
 import { useSettings } from '@/lib/store/settings';
 import { CompanionClient } from '@/lib/companion/client';
-import { clientForMachine, launchCollaborativeTask, type CollabParticipant, type CollabTaskConfig, type CollabRole } from '@/lib/agent/collab-service';
+import { clientForMachine, launchCollaborativeTask, runDistributedFanout, type CollabParticipant, type CollabTaskConfig, type CollabRole } from '@/lib/agent/collab-service';
 import type { ProtocolSetting } from '@/lib/store/settings';
 import type { AgentEvent } from '@/lib/agent/types';
 import type { CoordinatorReport } from '@/lib/agent/coordinator';
@@ -818,7 +818,7 @@ function CollaborateTab() {
   const [participants, setParticipants] = useState<CollabParticipant[]>(() => [
     { machineId: 'local', machineName: 'This computer', baseUrl: 'http://127.0.0.1:8080/v1', model: settings.model || 'qwen3-coder-30b-a3b-instruct', roles: ['planner', 'reviewer'], residency: 'on-demand' },
   ]);
-  const [mode, setMode] = useState<'sequential' | 'parallel'>('sequential');
+  const [mode, setMode] = useState<'sequential' | 'parallel' | 'fanout'>('sequential');
   const [autoSteer, setAutoSteer] = useState(true);
   const [objective, setObjective] = useState('');
   const [running, setRunning] = useState(false);
@@ -902,7 +902,7 @@ function CollaborateTab() {
       workspaceHostPeerId: hostId === 'local' ? null : hostId,
       workspaceHostMachineName: hostName,
       participants,
-      executionMode: mode,
+      executionMode: (mode === 'fanout' ? 'sequential' : mode) as any, // fanout handled by runDistributedFanout
       autoSteering: autoSteer,
       maxTurnsPerStage: settings.agentTurns,
     };
@@ -1079,9 +1079,9 @@ function CollaborateTab() {
       <div className="rounded-lg border p-3 space-y-2">
         <div className="flex items-center gap-4 flex-wrap">
           <div className="flex items-center gap-1.5">
-            {(['sequential', 'parallel'] as const).map((m) => (
+            {(['sequential', 'parallel', 'fanout'] as const).map((m) => (
               <button key={m} className={`px-2.5 py-1 rounded border text-xs ${mode === m ? 'border-primary text-primary bg-primary/10' : 'text-muted-foreground'}`} onClick={() => setMode(m)}>
-                {m === 'sequential' ? 'Sequential stages' : 'Parallel writers'}
+                {m === 'sequential' ? 'Sequential stages' : m === 'parallel' ? 'Parallel writers' : 'Parallel fan-out (distributed)'}
               </button>
             ))}
           </div>

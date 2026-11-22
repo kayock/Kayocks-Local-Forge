@@ -10,6 +10,7 @@ import { DashboardView } from '@/components/views/DashboardView';
 import { SettingsView } from '@/components/views/SettingsView';
 import { IdeView } from '@/components/ide/IdeView';
 import { ForgeView } from '@/components/forge/ForgeView';
+import { ControlCenter } from '@/components/mesh/ControlCenter';
 
 export default function Page() {
   const view = useRouter((s) => s.view);
@@ -32,6 +33,8 @@ export default function Page() {
       return <AuthView />;
     case 'forge':
       return <ForgeView />;
+    case 'control':
+      return <ControlCenter />;
     default:
       return <LandingView />;
   }

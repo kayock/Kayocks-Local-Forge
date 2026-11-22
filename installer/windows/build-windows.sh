@@ -34,6 +34,19 @@ command -v bun >/dev/null || { echo "Missing Bun compiler" >&2; exit 1; }
 mkdir -p "$OUT/LocalForgeCompanion" "$PUB"
 
 echo "== 1/3 companion.exe (bun --compile, windows-x64) =="
+  # Milestone P1: bundle the prebuilt node-pty sidecar next to the executable.
+  # The compiled binary cannot embed native modules; at runtime the companion
+  # loads node-pty from <exe-dir>/pty-sidecar/node-pty (loader verified on
+  # Linux; Windows prebuilt verification pending a Windows runner). Real PTY
+  # terminal in the installed app; NDJSON fallback retained if absent.
+  DIST_DIR="$(pwd)/installer/windows/dist"
+  mkdir -p "$DIST_DIR/pty-sidecar"
+  if [ -d "$(pwd)/companion/node_modules/node-pty" ]; then
+    cp -r "$(pwd)/companion/node_modules/node-pty" "$DIST_DIR/pty-sidecar/node-pty"
+    echo "  [sidecar] node-pty packaged next to companion.exe (real PTY in the installed app)"
+  else
+    echo "  [sidecar] node-pty missing from companion/node_modules — NDJSON fallback stays active"
+  fi
 bun build installer/windows/entry-companion.ts \
   --compile --target=bun-windows-x64 \
   --outfile "$OUT/LocalForgeCompanion/localforge-companion.exe" \

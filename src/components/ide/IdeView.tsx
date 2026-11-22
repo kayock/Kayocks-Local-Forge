@@ -32,6 +32,8 @@ import { AgentPanel } from './AgentPanel';
 import { TerminalPanel } from './TerminalPanel';
 import { PreviewPanel } from './PreviewPanel';
 import { ToolLogPanel } from './ToolLogPanel';
+import { DiagnosticsPanel } from './DiagnosticsPanel';
+import { Stethoscope } from 'lucide-react';
 import { CompanionClient } from '@/lib/companion/client';
 import { useSettings } from '@/lib/store/settings';
 import { useWorkspace } from '@/lib/store/workspace';
@@ -51,7 +53,7 @@ import { resolveInferenceParams } from '@/lib/types';
 import type { TaskContract } from '@/lib/agent/task-contract';
 import { toast } from '@/hooks/use-toast';
 
-type BottomTab = 'terminal' | 'preview' | 'toollog';
+type BottomTab = 'terminal' | 'preview' | 'toollog' | 'diagnostics';
 type LeftTab = 'explorer' | 'git';
 
 export function IdeView() {
@@ -738,11 +740,13 @@ export function IdeView() {
                     <TabsTrigger value="terminal" className="rounded-none h-8 px-3 text-xs data-[state=active]:bg-card">Terminal</TabsTrigger>
                     <TabsTrigger value="preview" className="rounded-none h-8 px-3 text-xs data-[state=active]:bg-card">Preview</TabsTrigger>
                     <TabsTrigger value="toollog" className="rounded-none h-8 px-3 text-xs data-[state=active]:bg-card">Tool log</TabsTrigger>
+                    <TabsTrigger value="diagnostics" className="gap-1.5 text-xs"><Stethoscope className="w-3.5 h-3.5" /> Diagnostics</TabsTrigger>
                   </TabsList>
                   <div className="flex-1 min-h-0">
                     {bottomTab === 'terminal' && <TerminalPanel client={client} active={bottomTab === 'terminal'} />}
                     {bottomTab === 'preview' && <PreviewPanel client={client} active={bottomTab === 'preview'} />}
                     {bottomTab === 'toollog' && <ToolLogPanel />}
+                    {bottomTab === 'diagnostics' && <DiagnosticsPanel client={client} />}
                   </div>
                 </Tabs>
               </ResizablePanel>

@@ -1,7 +1,7 @@
 // Hash-based view router (single-route app: /#/...).
 import { create } from 'zustand';
 
-export type ViewId = 'landing' | 'ide' | 'dashboard' | 'settings' | 'auth' | 'forge';
+export type ViewId = 'landing' | 'ide' | 'dashboard' | 'settings' | 'auth' | 'forge' | 'control';
 
 interface RouterState {
   view: ViewId;
@@ -19,6 +19,7 @@ function parseHash(): { view: ViewId; authMode: 'login' | 'signup' } {
   else if (seg === 'settings') view = 'settings';
   else if (seg === 'auth') view = 'auth';
   else if (seg === 'forge') view = 'forge';
+  else if (seg === 'control') view = 'control';
   return { view, authMode: param === 'signup' ? 'signup' : 'login' };
 }
 
@@ -29,6 +30,7 @@ function toHash(view: ViewId, authMode?: 'login' | 'signup'): string {
     case 'settings': return '#/settings';
     case 'auth': return authMode === 'signup' ? '#/auth/signup' : '#/auth/login';
     case 'forge': return '#/forge';
+    case 'control': return '#/control';
     default: return '#/';
   }
 }
