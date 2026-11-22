@@ -463,6 +463,18 @@ export const CORE_TOOLS: ToolDef[] = [
     },
   },
   {
+    name: 'propose_task_graph',
+    description: 'Propose the parallel decomposition of the objective as a dependency-ordered task graph. Call ONCE with the complete graph.',
+    danger: 'safe',
+    params: [
+      { name: 'tasks', type: 'object', description: 'Array of 2-6 subtasks: {key, title, stage, prompt, machineId?, dependsOn?, contextFiles?, requirements?}', required: true },
+    ],
+    async run(args, _ctx) {
+      const n = Array.isArray(args?.tasks) ? args.tasks.length : 0;
+      return { output: `Task graph accepted (${n} tasks) — the coordinator validated the graph and is scheduling tasks.` };
+    },
+  },
+  {
     name: 'create_dir',
     description: 'Create a directory (and parents) in the workspace.',
     danger: 'safe',

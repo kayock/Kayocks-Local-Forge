@@ -39,13 +39,16 @@ echo "== 1/3 companion.exe (bun --compile, windows-x64) =="
   # loads node-pty from <exe-dir>/pty-sidecar/node-pty (loader verified on
   # Linux; Windows prebuilt verification pending a Windows runner). Real PTY
   # terminal in the installed app; NDJSON fallback retained if absent.
-  DIST_DIR="$(pwd)/installer/windows/dist"
-  mkdir -p "$DIST_DIR/pty-sidecar"
+  # The sidecar MUST be staged into the same payload directory the NSIS
+  # installer packs ($OUT/LocalForgeCompanion/) — the loader resolves it
+  # relative to the installed executable at <exe-dir>/pty-sidecar/node-pty.
+  mkdir -p "$OUT/LocalForgeCompanion/pty-sidecar"
   if [ -d "$(pwd)/companion/node_modules/node-pty" ]; then
-    cp -r "$(pwd)/companion/node_modules/node-pty" "$DIST_DIR/pty-sidecar/node-pty"
-    echo "  [sidecar] node-pty packaged next to companion.exe (real PTY in the installed app)"
+    rm -rf "$OUT/LocalForgeCompanion/pty-sidecar/node-pty"
+    cp -r "$(pwd)/companion/node_modules/node-pty" "$OUT/LocalForgeCompanion/pty-sidecar/node-pty"
+    echo "  [sidecar] node-pty staged into the installer payload (real PTY in the installed app)"
   else
-    echo "  [sidecar] node-pty missing from companion/node_modules — NDJSON fallback stays active"
+    echo "  [sidecar] node-pty missing from companion/node_modules — installer ships WITHOUT the PTY sidecar (NDJSON fallback stays active)"
   fi
 bun build installer/windows/entry-companion.ts \
   --compile --target=bun-windows-x64 \

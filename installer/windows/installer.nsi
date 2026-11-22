@@ -61,6 +61,12 @@ Section "LocalForge Companion (required)" SEC_CORE
   File "..\..\download\windows\LocalForgeCompanion\localforge-companion.exe"
   File "..\..\download\windows\LocalForgeCompanion\LocalForgeTray.exe"
 
+  ; Real PTY backend: prebuilt node-pty sidecar loaded at runtime from
+  ; <exe-dir>/pty-sidecar/node-pty (companion/src/pty.js resolves it relative
+  ; to the installed executable). Without this directory the companion falls
+  ; back to the NDJSON streaming terminal.
+  File /r "..\..\download\windows\LocalForgeCompanion\pty-sidecar"
+
   ; registry: uninstall info + install dir memory
   WriteRegStr HKCU "Software\LocalForge\Companion" "InstallDir" "$INSTDIR"
   WriteRegStr HKCU "Software\LocalForge\Companion" "Version" "${VERSION}"
@@ -117,6 +123,7 @@ Section "Uninstall"
   ExecWait 'taskkill.exe /IM LocalForgeTray.exe /T /F'
   Delete "$INSTDIR\LocalForgeCompanion\localforge-companion.exe"
   Delete "$INSTDIR\LocalForgeCompanion\LocalForgeTray.exe"
+  RMDir /r "$INSTDIR\LocalForgeCompanion\pty-sidecar"
   RMDir "$INSTDIR\LocalForgeCompanion"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"

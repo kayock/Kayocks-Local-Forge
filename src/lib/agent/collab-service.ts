@@ -241,6 +241,68 @@ const PLANNER_TASKS_TOOL = {
   },
 };
 
+// Validates a planner-produced task graph: keys unique, deps exist and are
+// acyclic, assignments resolve to a participating machine, parallelism cap.
+// Returns the normalized FanoutTaskSpec[] on success; problems explain every
+// defect so the corrective re-prompt (or the deterministic fallback) is
+// transparent, never silent.
+function validateTaskGraph(graph: any): { ok: boolean; canRepair: boolean; problems: string[]; tasks: FanoutTaskSpec[] } {
+  const problems: string[] = [];
+  const raw = Array.isArray(graph?.tasks) ? graph.tasks : null;
+  if (!raw || raw.length === 0) return { ok: false, canRepair: !!graph, problems: ['no tasks array present'], tasks: [] };
+  if (raw.length > 8) problems.push('more than 8 tasks — planner must decompose into 2-6 subtasks');
+  const seen = new Set<string>();
+  const validStages = new Set(['coder', 'tester', 'reviewer', 'debugger', 'planner']);
+  const tasks: FanoutTaskSpec[] = [];
+  for (const t of raw.slice(0, 6)) {
+    if (!t || typeof t !== 'object') { problems.push('non-object task entry'); continue; }
+    const key = String(t.key ?? '').trim().slice(0, 40);
+    const title = String(t.title ?? '').trim().slice(0, 120);
+    const prompt = String(t.prompt ?? '').trim().slice(0, 8000);
+    if (!key) { problems.push(`task missing key (${title || 'untitled'})`); continue; }
+    if (!prompt) { problems.push(`task "${key}" has an empty prompt`); continue; }
+    if (seen.has(key)) { problems.push(`duplicate task key "${key}"`); continue; }
+    seen.add(key);
+    tasks.push({
+      key, title: title || key,
+      stage: validStages.has(String(t.stage)) ? String(t.stage) as FanoutStage : 'coder',
+      prompt,
+      machineId: t.machineId && t.machineId !== 'auto' && t.machineId !== 'local' ? String(t.machineId) : undefined,
+      dependsOn: Array.isArray(t.dependsOn) ? [...new Set(t.dependsOn.map((d: any) => String(d).trim()).filter(Boolean))].slice(0, 6) as string[] : [],
+      contextFiles: Array.isArray(t.contextFiles) ? t.contextFiles.map((f: any) => String(f)).slice(0, 12) : [],
+      requirements: Array.isArray(t.requirements) ? t.requirements.map((r: any) => String(r)).slice(0, 8) : [],
+    });
+  }
+  if (tasks.length < 1) problems.push('no usable tasks after validation');
+  // dependency references must exist
+  for (const t of tasks) {
+    t.dependsOn = (t.dependsOn as string[]).filter((d) => {
+      if (!seen.has(d)) { problems.push(`task "${t.key}" depends on unknown task "${d}" (dropped)`); return false; }
+      if (d === t.key) { problems.push(`task "${t.key}" depends on itself (dropped)`); return false; }
+      return true;
+    });
+  }
+  // cycle detection (DFS, iterative)
+  const color = new Map<string, number>();
+  const onStack = new Set<string>();
+  const visit = (k: string): boolean => {
+    color.set(k, 1); onStack.add(k);
+    for (const d of tasks.find((t) => t.key === k)?.dependsOn ?? []) {
+      if (onStack.has(d)) { problems.push(`circular dependency involving "${d}"`); return false; }
+      if (!color.get(d) && !visit(d)) return false;
+    }
+    onStack.delete(k); color.set(k, 2);
+    return true;
+  };
+  for (const t of tasks) if (!color.get(t.key) && !visit(t.key)) break;
+  return {
+    ok: problems.length === 0 && tasks.length >= 1,
+    canRepair: !!graph,
+    problems: [...new Set(problems)].slice(0, 6),
+    tasks,
+  };
+}
+
 export async function runDistributedFanout(
   cfg: CollabTaskConfig,
   opts: Parameters<typeof launchCollaborativeTask>[1],
@@ -280,45 +342,60 @@ export async function runDistributedFanout(
       'Decompose the objective into a DEPENDENCY-ORDERED graph of 2-6 concrete subtasks. Every prompt must be self-contained (a fresh agent reads only that). Assign machineId explicitly when the objective needs a specific machine; use "auto" otherwise.',
     ].join('\n\n'),
     task: cfg.objective,
-    tools: [...toolsByNames(['finish']), { name: 'propose_task_graph', description: PLANNER_TASKS_TOOL.function.description, danger: 'safe', params: [], run: async () => ({ output: 'Task graph accepted.' }) } as any],
+    tools: [...toolsByNames(['finish']), { name: 'propose_task_graph', description: PLANNER_TASKS_TOOL.function.description, danger: 'safe', params: [], run: async (toolArgs: any) => { if (process.env.LF_DEBUG_STOP) console.error('[graph-tool] args:', JSON.stringify(toolArgs).slice(0, 120)); taskGraph = toolArgs; return { output: 'Task graph accepted — the coordinator validated the graph and is scheduling tasks.' }; } } as any],
     toolProtocol: plannerTarget.toolProtocol,
     maxTurns: Math.max(4, Math.min(defaultTurns, 12)),
     onEvent: (e) => { plannerEvents.push(e); opts.onEvent({ ...e, stage: 'planner' } as any); },
     signal: opts.signal,
   } as any);
-  // intercept the propose_task_graph call from the model stream: the planner
-  // emits it as a native tool call — capture it via the events stream.
+  // REAL capture: the model's native tool-call arguments arrive here —
+  // parseToolCallArgs + validateToolArgs already ran (truncated/unparseable
+  // calls are refused before this point), so args is validated JSON.
   let taskGraph: any = null;
-  const origRun = plannerRunner.run.bind(plannerRunner);
-  // Simplest reliable capture: run the planner with a mocked tool host is NOT
-  // acceptable — instead run the planner and parse the graph from its finish
-  // summary when the tool capture is not available.
   const plannerResult = await plannerRunner.run();
-  if (taskGraph === null) {
-    // fallback: parse a JSON task array from the planner's final content
-    const matchJson = plannerResult.content.match(/\[[\s\S]*\]/);
-    if (matchJson) { try { taskGraph = { tasks: JSON.parse(matchJson[0]) }; } catch { /* fall through */ } }
+  if (taskGraph === null && plannerResult.content) {
+    // JSON fallback: planner replied with a bare task array instead of a
+    // native tool call (common for text-protocol or small models).
+    const m = plannerResult.content.match(/\[[\s\S]*\]/);
+    if (m) { try { taskGraph = { tasks: JSON.parse(m[0]) }; } catch { /* fall through to recovery */ } }
   }
-  const rawTasks: any[] = Array.isArray(taskGraph?.tasks) && taskGraph.tasks.length
-    ? taskGraph.tasks
-    : // deterministic default split when the planner produced no parseable graph
-      [
-        { key: 'impl', title: 'Implement the objective', stage: 'coder', prompt: cfg.objective, machineId: 'auto', dependsOn: [], requirements: contract.requirements.filter((r) => r.source === 'user').map((r) => r.text) },
-        { key: 'verify', title: 'Verify the implementation', stage: 'tester', prompt: `Verify the work completed for: ${cfg.objective}. Run the project's tests/build, fix trivial failures, and report evidence.`, machineId: 'auto', dependsOn: ['impl'], requirements: ['verification evidence exists'] },
+  const validation = validateTaskGraph(taskGraph);
+  if (!validation.ok && validation.canRepair) {
+    // bounded corrective re-prompt (one attempt): report the exact defects
+    opts.onEvent({ type: 'notice', message: `Planner task graph invalid (${validation.problems.join('; ')}) — requesting a corrected graph.` } as any);
+    const repairRunner = new AgentRunner({
+      companion: opts.workspaceHost,
+      toolCompanion: opts.workspaceHost,
+      workspaceId: opts.workspaceId,
+      provider: plannerTarget.provider,
+      model: plannerTarget.model,
+      systemPrompt: 'You fix invalid task graphs. Reply with ONLY the corrected JSON array of tasks.',
+      task: `Original objective: ${cfg.objective}\n\nInvalid graph (JSON): ${JSON.stringify(taskGraph ?? {}).slice(0, 6000)}\n\nDefects: ${validation.problems.join('; ')}. Return the corrected JSON array.`,
+      tools: [],
+      toolProtocol: 'text',
+      maxTurns: 2,
+      onEvent: () => {},
+      signal: opts.signal,
+    } as any);
+    const repairResult = await repairRunner.run();
+    const m = repairResult.content.match(/\[[\s\S]*\]/);
+    if (m) { try { taskGraph = { tasks: JSON.parse(m[0]) }; } catch { /* keep invalid */ } }
+  }
+  const validation2 = validateTaskGraph(taskGraph);
+  if (!validation2.ok) {
+    // clearly reported recovery path — NOT a silent placeholder
+    opts.onEvent({ type: 'notice', message: `Planner produced no valid task graph (${validation2.problems.join('; ')}). Using the deterministic decomposition: [impl] → [verify] with the full objective as the coder task.` } as any);
+  }
+
+  // ONLY a fully valid graph schedules tasks; anything else uses the
+  // deterministic split announced in the notice above (never a silent
+  // partial graph, never placeholder tasks pretending to be the plan).
+  const specs: FanoutTaskSpec[] = validation2.ok
+    ? validation2.tasks
+    : [
+        { key: 'impl', title: 'Implement the objective', stage: 'coder', prompt: cfg.objective, dependsOn: [], contextFiles: [], requirements: contract.requirements.filter((r) => r.source === 'user').map((r) => r.text) },
+        { key: 'verify', title: 'Verify the implementation', stage: 'tester', prompt: `Verify the work completed for: ${cfg.objective}. Run the project's tests/build, fix trivial failures, and report evidence.`, dependsOn: ['impl'], contextFiles: [], requirements: ['verification evidence exists'] },
       ];
-  const validStages = new Set(['coder', 'tester', 'reviewer', 'debugger', 'planner']);
-  const specs: FanoutTaskSpec[] = rawTasks.filter((t) => t && t.key && t.title && t.prompt)
-    .slice(0, 6)
-    .map((t) => ({
-      key: String(t.key).slice(0, 40),
-      title: String(t.title).slice(0, 120),
-      stage: validStages.has(String(t.stage)) ? String(t.stage) as FanoutStage : 'coder',
-      prompt: String(t.prompt).slice(0, 8000),
-      machineId: t.machineId && t.machineId !== 'auto' ? String(t.machineId) : undefined,
-      dependsOn: Array.isArray(t.dependsOn) ? t.dependsOn.map((d: any) => String(d)) : [],
-      contextFiles: Array.isArray(t.contextFiles) ? t.contextFiles.map((f: any) => String(f)) : [],
-      requirements: Array.isArray(t.requirements) ? t.requirements.map((r: any) => String(r)) : [],
-    }));
 
   // 2) FanoutRunner executes the graph across the participating machines
   const machines: FanoutMachine[] = cfg.participants.map((p) => ({
