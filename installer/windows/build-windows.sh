@@ -4,8 +4,14 @@
 #   2. LocalForgeTray.exe       — native Win32 tray GUI (zig cc, no runtime)
 #   3. LocalForge-Companion-Setup-<ver>.exe — NSIS per-user installer
 # Outputs land in download/windows/ and are copied to public/downloads/ for
-# the published site. Cross-compilation only; Windows-native execution is
-# UNVERIFIED in this environment (see docs/WINDOWS_INSTALL.md).
+# the published site.
+#
+# RC4 NOTE: this script cross-compiles on Linux — fine for local development
+# previews, but the node-pty sidecar it stages comes from a LINUX npm tree
+# and is therefore NOT authoritative for distribution. The authoritative
+# installer (Windows-built node-pty, Windows compile, NSIS on Windows, plus
+# silent-install verification of the exact artifact) is produced by
+# .github/workflows/windows-installer.yml on a windows-latest runner.
 set -euo pipefail
 cd "$(dirname "$0")/../.."   # project root
 

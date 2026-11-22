@@ -37,7 +37,7 @@ RequestExecutionLevel user
 SetCompressor /SOLID lzma
 
 !define MUI_ABORTWARNING
-!define MUI_FINISHPAGE_RUN "$INSTDIR\LocalForgeTray.exe"
+!define MUI_FINISHPAGE_RUN "$INSTDIR\LocalForgeCompanion\LocalForgeTray.exe"
 !define MUI_FINISHPAGE_RUN_TEXT "Start the LocalForge Companion tray now"
 !define MUI_FINISHPAGE_RUN_CHECKED
 
@@ -89,7 +89,7 @@ SectionEnd
 
 Section "Start Menu shortcut" SEC_SM
   CreateDirectory "$SMPROGRAMS\LocalForge"
-  CreateShortcut "$SMPROGRAMS\LocalForge\LocalForge Companion.lnk" "$INSTDIR\LocalForgeTray.exe" \
+  CreateShortcut "$SMPROGRAMS\LocalForge\LocalForge Companion.lnk" "$INSTDIR\LocalForgeCompanion\LocalForgeTray.exe" \
                  "" "$INSTDIR\LocalForgeCompanion"
   CreateShortcut "$SMPROGRAMS\LocalForge\LocalForge IDE (website).lnk" "${PRODUCT_URL}" \
                  "" "$INSTDIR\LocalForgeCompanion"
@@ -97,13 +97,13 @@ Section "Start Menu shortcut" SEC_SM
 SectionEnd
 
 Section /o "Desktop shortcut" SEC_DESK
-  CreateShortcut "$DESKTOP\LocalForge Companion.lnk" "$INSTDIR\LocalForgeTray.exe" \
+  CreateShortcut "$DESKTOP\LocalForge Companion.lnk" "$INSTDIR\LocalForgeCompanion\LocalForgeTray.exe" \
                  "" "$INSTDIR\LocalForgeCompanion"
 SectionEnd
 
 Section /o "Start with Windows (run companion at login)" SEC_AUTORUN
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "LocalForgeCompanionTray" \
-                 '"$INSTDIR\LocalForgeTray.exe" /minimize'
+                 '"$INSTDIR\LocalForgeCompanion\LocalForgeTray.exe" /minimize'
 SectionEnd
 
 ; ---- descriptions on the components page ----

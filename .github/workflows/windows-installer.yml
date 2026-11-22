@@ -1,12 +1,19 @@
-# RC3 — Windows installer build + native PTY verification on a real Windows runner.
+# RC4 — LocalForge Windows installer: NATIVE build + installed-product verification.
 #
-# The LocalForge Windows installer can only be honestly verified on Windows.
-# This workflow:
-#   1. builds the unsigned installer (linux, bun cross-compile + NSIS) and
-#      asserts the node-pty sidecar is inside the NSIS payload;
-#   2. on windows-latest: runs the Companion test suite (real node-pty), then
-#      boots the compiled companion.exe with the sidecar and probes
-#      /api/pty/capabilities — native backend must report available.
+# One authoritative build runs on windows-latest:
+#   - node-pty is installed WITH npm on Windows (real node-gyp build against
+#     the Windows ABI — no cross-compiled binaries in the payload)
+#   - the Companion suite (incl. live PTY tests) must pass BEFORE packaging
+#   - localforge-companion.exe compiles from installer/windows/entry-companion.ts
+#   - LocalForgeTray.exe compiles from tray_main.c with mingw gcc
+#   - NSIS (makensis) packages the exact payload incl. the Windows sidecar
+#   - SHA256SUMS.txt is produced and uploaded WITH the installer
+# A second job downloads THAT artifact, verifies its hash, silently installs
+# it, and runs installer/windows/verify-installed.mjs against the installed
+# product (files, shortcut resolution, native PTY backend, real PowerShell
+# session with cwd/env persistence, resize, Ctrl+C, cleanup, uninstall).
+# Any mandatory failure turns the workflow red. Unsigned installers are
+# labeled as such — no code-signing claims.
 name: windows-installer
 
 on:
@@ -20,36 +27,96 @@ on:
 
 jobs:
   build-installer:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      - name: Install NSIS
-        run: sudo apt-get update && sudo apt-get install -y nsis
-      - name: Install companion deps (for the node-pty sidecar payload)
-        working-directory: companion
-        run: bun install
-      - name: Build the Windows installer
-        run: bash installer/windows/build-windows.sh
-      - name: Assert the PTY sidecar is in the NSIS payload
+
+      - name: Install build tools (NSIS, mingw gcc)
         run: |
-          test -d download/windows/LocalForgeCompanion/pty-sidecar/node-pty || {
-            echo "FAIL: pty-sidecar/node-pty missing from the installer payload"; exit 1;
+          choco install nsis mingw -y --no-progress
+          echo "C:\Program Files (x86)\NSIS" >> "$GITHUB_PATH"
+
+      - name: Install companion dependencies (REAL Windows node-pty build)
+        working-directory: companion
+        run: |
+          npm install --no-audit --no-fund 2>&1 | tee npm-install.log
+          test -f node_modules/node-pty/build/Release/pty.node || test -f node_modules/node-pty/build/Release/conpty.node || {
+            echo "FAIL: node-pty native binary was not built for Windows"; exit 1;
           }
-          test -f download/windows/LocalForgeCompanion/pty-sidecar/node-pty/package.json || {
-            echo "FAIL: sidecar package.json missing"; exit 1;
+          ls -la node_modules/node-pty/build/Release/
+
+      - name: Companion test suite on native Windows (includes live PTY)
+        working-directory: companion
+        run: npm test
+
+      - name: Compile the Companion (correct entry point, no error suppression)
+        run: |
+          VER=$(node -e "console.log(require('./companion/package.json').version)")
+          echo "LF_VER=$VER" >> "$GITHUB_ENV"
+          mkdir -p download/windows/LocalForgeCompanion
+          bun build installer/windows/entry-companion.ts \
+            --compile --target=bun-windows-x64 \
+            --outfile download/windows/LocalForgeCompanion/localforge-companion.exe \
+            --define 'process.env.NODE_ENV:"production"'
+          test -f download/windows/LocalForgeCompanion/localforge-companion.exe || {
+            echo "FAIL: companion exe was not produced"; exit 1;
           }
-          echo "PTY sidecar present in the installer payload"
+
+      - name: Compile the tray GUI (mingw gcc, windows-x64)
+        run: |
+          GCC=$(command -v gcc || ls /c/ProgramData/chocolatey/lib/mingw/tools/install/mingw64/bin/gcc.exe 2>/dev/null || ls /c/ProgramData/chocolatey/lib/mingw/tools/mingw64/bin/gcc.exe 2>/dev/null)
+          test -n "$GCC" || { echo "FAIL: mingw gcc not found"; exit 1; }
+          "$GCC" -O2 -Wno-unused-function \
+            -o download/windows/LocalForgeCompanion/LocalForgeTray.exe \
+            installer/windows/tray_main.c \
+            -luser32 -lshell32 -lgdi32 -ladvapi32 -lcomctl32 -lws2_32 -municode
+          test -f download/windows/LocalForgeCompanion/LocalForgeTray.exe || { echo "FAIL: tray exe missing"; exit 1; }
+          python scripts/pe-set-gui-subsystem.py download/windows/LocalForgeCompanion/LocalForgeTray.exe
+
+      - name: Stage the WINDOWS-BUILT node-pty sidecar into the payload
+        run: |
+          mkdir -p download/windows/LocalForgeCompanion/pty-sidecar
+          rm -rf download/windows/LocalForgeCompanion/pty-sidecar/node-pty
+          cp -r companion/node_modules/node-pty download/windows/LocalForgeCompanion/pty-sidecar/node-pty
+          test -d download/windows/LocalForgeCompanion/pty-sidecar/node-pty || { echo "FAIL: sidecar staging failed"; exit 1; }
+          ls download/windows/LocalForgeCompanion/pty-sidecar/node-pty/build/Release/
+
+      - name: Build the NSIS installer (one authoritative artifact)
+        run: |
+          cat > download/windows/version.nsi.inc <<EOF
+          !define LF_VERSION "$LF_VER"
+          EOF
+          makensis -V2 -DVERSION="$LF_VER" installer/windows/installer.nsi
+          test -f "download/windows/LocalForge-Companion-Setup-$LF_VER.exe" || {
+            echo "FAIL: NSIS did not produce the installer"; exit 1;
+          }
+          cd download/windows
+          sha256sum LocalForgeCompanion/localforge-companion.exe LocalForgeCompanion/LocalForgeTray.exe | tee payload-hashes.log
+          sha256sum "LocalForge-Companion-Setup-$LF_VER.exe" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          echo "NOTE: this installer is UNSIGNED (no code-signing certificate configured)"
+
       - uses: actions/upload-artifact@v4
         with:
-          name: localforge-windows-installer
+          name: localforge-windows-installer-unsigned
           path: |
             download/windows/LocalForge-Companion-Setup-*.exe
+            download/windows/SHA256SUMS.txt
             download/windows/version.nsi.inc
+          if-no-files-found: error
 
-  verify-windows-pty:
+  verify-installed:
     runs-on: windows-latest
     needs: build-installer
     defaults:
@@ -57,41 +124,49 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
+
+      - uses: actions/setup-node@v4
         with:
-          bun-version: latest
-      - name: Companion test suite on real Windows (includes node-pty)
-        working-directory: companion
+          node-version: 20
+
+      - name: Download THE built installer artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: localforge-windows-installer-unsigned
+          path: download/windows
+
+      - name: Verify the artifact hash BEFORE installing
+        working-directory: download/windows
         run: |
-          bun install
-          bun test test/pty.test.mjs || true
-          npm test -- --test-name-pattern="pty" || true
-      - name: Compile companion.exe for Windows
-        working-directory: companion
-        run: bun build entry-windows.ts --compile --target=bun-windows-x64 --outfile ../download/windows/LocalForgeCompanion/localforge-companion.exe
-        continue-on-error: true # entry may differ; the sidecar probe below is the gate
-      - name: Stage the sidecar next to the executable
+          sha256sum -c SHA256SUMS.txt || { echo "FAIL: artifact hash mismatch"; exit 1; }
+
+      - name: Silent-install the exact installer artifact
+        working-directory: download/windows
         run: |
-          mkdir -p download/windows/LocalForgeCompanion/pty-sidecar
-          cp -r companion/node_modules/node-pty download/windows/LocalForgeCompanion/pty-sidecar/node-pty
-      - name: Probe native PTY through the sidecar loader
-        working-directory: companion
+          SETUP=$(ls LocalForge-Companion-Setup-*.exe | head -1)
+          echo "Installing $SETUP (unsigned RC candidate) silently…"
+          "./$SETUP" /S
+          for i in $(seq 1 60); do
+            test -f "$LOCALAPPDATA/Programs/LocalForge Companion/LocalForgeCompanion/localforge-companion.exe" && break
+            sleep 1
+          done
+          test -f "$LOCALAPPDATA/Programs/LocalForge Companion/LocalForgeCompanion/localforge-companion.exe" || {
+            echo "FAIL: silent installation did not produce the installed companion exe"; exit 1;
+          }
+          echo "LF_ARTIFACT_DIR=$PWD" >> "$GITHUB_ENV"
+
+      - name: Verify the INSTALLED product (files, shortcuts, native PTY, real PowerShell session, uninstall)
         run: |
-          node -e "
-          const { spawn } = require('node:child_process');
-          const exe = '../download/windows/LocalForgeCompanion/localforge-companion.exe';
-          const cmd = process.platform === 'win32' ? exe : ['src/server.js', '--port', '7599', '--home', process.env.LF_HOME || 'probe-home', '--no-mdns'].join(' ');
-          const proc = spawn(cmd, [], { shell: true, stdio: ['ignore', 'pipe', 'pipe'] });
-          let out = '';
-          proc.stdout.on('data', (d) => (out += d));
-          proc.stderr.on('data', (d) => (out += d));
-          setTimeout(async () => {
-            try {
-              const st = JSON.parse(require('fs').readFileSync((process.env.LF_HOME || 'probe-home') + '/state.json', 'utf8'));
-              const pr = await (await fetch('http://127.0.0.1:7599/pair', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: st.pairingCode, deviceLabel: 'ci' }) })).json();
-              const caps = await (await fetch('http://127.0.0.1:7599/api/pty/capabilities', { headers: { Authorization: 'Bearer ' + pr.token } })).json();
-              console.log('PTY CAPS:', JSON.stringify(caps));
-              process.exit(caps.available && caps.backend.startsWith('node-pty') ? 0 : 2);
-            } catch (e) { console.log('probe failed:', e.message); process.exit(2); }
-          }, 8000);
-          "
+          node installer/windows/verify-installed.mjs --port 7667 2>&1 | tee installed-verification.log
+          test ${PIPESTATUS[0]} -eq 0 || { echo "FAIL: installed-product verification failed"; exit 1; }
+
+      - name: Upload diagnostics (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-verification-diagnostics
+          path: |
+            installed-verification.log
+            download/windows/installed-companion.log
+            companion/npm-install.log
+          if-no-files-found: ignore
