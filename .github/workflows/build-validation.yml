@@ -98,6 +98,8 @@ jobs:
           $stderr = Join-Path $env:TEMP 'localforge-help-err.txt'
           $help = Start-Process -FilePath $bin -ArgumentList '--help' -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
           if (-not $help.WaitForExit(30000)) {
+            if (Test-Path $stdout) { Write-Host (Get-Content $stdout -Raw) }
+            if (Test-Path $stderr) { Write-Warning (Get-Content $stderr -Raw) }
             Stop-Process -Id $help.Id -Force -ErrorAction SilentlyContinue
             throw 'Bundled companion --help did not exit within 30 seconds'
           }

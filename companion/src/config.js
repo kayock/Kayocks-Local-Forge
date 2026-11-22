@@ -7,9 +7,13 @@ import crypto from 'node:crypto';
 
 export const VERSION = '0.4.5';
 
-function parseArgs(argv) {
+// node src/server.js: argv[1] is a script filename, options begin at [2].
+// Bun standalone .exe: argv[0] is the executable, options may begin at [1].
+// Recognize both formats so tray --home/--status-file/--port and --help work.
+export function parseArgs(argv) {
   const out = {};
-  for (let i = 2; i < argv.length; i++) {
+  const start = argv[1]?.startsWith('--') ? 1 : 2;
+  for (let i = start; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--port') out.port = Number(argv[++i]);
     else if (a === '--host') out.host = argv[++i];

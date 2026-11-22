@@ -11,6 +11,7 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import { resolveInWorkspace, statPath, extractArchive, FsError } from '../src/fsapi.js';
 import { screenCommand } from '../src/exec.js';
+import { parseArgs } from '../src/config.js';
 
 function tmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'lf-companion-unit-'));
@@ -142,4 +143,18 @@ test('screenCommand hard-denies dangerous patterns and needs confirm for privile
   assert.equal(confirmed.allowed, true);
   const ok = screenCommand('echo integration-ok', { confirm: false });
   assert.equal(ok.allowed, true);
+});
+
+
+test('CLI option parsing supports Node.js scripts and Bun standalone executables', () => {
+  const opts = ['--host', '0.0.0.0', '--port', '7338', '--home', 'C:\\Custom Forge', '--status-file', 'C:\\Custom Forge\\status.json', '--lan', '--show-code'];
+  const nodeArgs = parseArgs(['node', '/repo/companion/src/server.js', ...opts]);
+  const compiledArgs = parseArgs(['C:\\LocalForgeCompanion\\localforge-companion.exe', ...opts]);
+  assert.deepEqual(compiledArgs, nodeArgs);
+  assert.equal(compiledArgs.host, '0.0.0.0');
+  assert.equal(compiledArgs.port, 7338);
+  assert.equal(compiledArgs.lan, true);
+  assert.equal(compiledArgs.showCode, true);
+  assert.equal(parseArgs(['C:\\LocalForgeCompanion\\localforge-companion.exe', '--help']).help, true);
+  assert.equal(parseArgs(['node', '/repo/companion/src/server.js', '--help']).help, true);
 });
