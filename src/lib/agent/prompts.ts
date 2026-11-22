@@ -6,12 +6,22 @@ export interface WorkspaceContext {
   workspacePath: string;
   tree?: string;          // shallow file listing
   packageInfo?: string;   // package.json summary if present
+  projectName?: string;
+  machineLabel?: string;
 }
 
+// Milestone 4: the AUTHORITATIVE workspace block — one place the model can
+// re-anchor on. Never paraphrased, never re-derived from tool probing.
 function workspaceBlock(ctx: WorkspaceContext): string {
   const parts = [
-    `Platform: ${ctx.platform}. Workspace: ${ctx.workspacePath}`,
-    ctx.tree ? `Workspace files:\n${ctx.tree}` : '',
+    [
+      'WORKSPACE (authoritative — re-anchor here; do not re-derive by probing):',
+      `  root (absolute): ${ctx.workspacePath}`,
+      `  platform: ${ctx.platform}`,
+      ctx.machineLabel ? `  machine: ${ctx.machineLabel}` : '',
+      ctx.projectName ? `  Selected project: ${ctx.projectName}` : '',
+      ctx.tree ? `  known top-level structure:\n${ctx.tree}` : '',
+    ].filter(Boolean).join('\n'),
     ctx.packageInfo ? `package.json summary:\n${ctx.packageInfo}` : '',
   ];
   return parts.filter(Boolean).join('\n\n');

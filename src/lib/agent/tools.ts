@@ -219,9 +219,11 @@ export const CORE_TOOLS: ToolDef[] = [
         `canonical root (absolute): ${rootAbs}`,
         `machine: ${meta?.machineLabel ?? 'the paired companion'}`,
         `platform: ${meta?.platform ?? 'unknown'}`,
+        meta?.projectName ? `selected project: ${meta.projectName}` : '',
         `root state: ${rootState}`,
+        meta?.knownTree ? `known top-level structure (from the IDE, authoritative):\n${meta.knownTree}` : '',
         'All tool paths are relative to this root. If a path you expected is missing, list "." to see what actually exists here.',
-      ];
+      ].filter(Boolean);
       return { output: lines.join('\n') };
     },
   },

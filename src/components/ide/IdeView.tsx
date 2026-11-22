@@ -417,6 +417,16 @@ export function IdeView() {
         runs.addOp(runId, { kind: 'recovery', summary: e.message.slice(0, 200), status: 'blocked' });
         return;
       }
+      if ((e as any).type === 'recovery_action') {
+        const ra = e as any;
+        agent.addMessage({ role: 'system', content: `♻ Recovery ${ra.step}/2 (${ra.action}) after ${ra.stallClass} stall` });
+        runs.addOp(runId, { kind: 'recovery', summary: `Recovery ${ra.step}/2: ${ra.action} (${ra.stallClass} stall)`, status: 'blocked' });
+        return;
+      }
+      if ((e as any).type === 'stalled') {
+        runs.addOp(runId, { kind: 'recovery', summary: 'STALLED — run stopped honestly, progress preserved', status: 'error' });
+        return;
+      }
       if (e.type === 'diff_preview') {
         // Milestone 1: file writes/edits show a diff in the timeline (the full
         // unified diff lives on the tool card; the op carries the summary).

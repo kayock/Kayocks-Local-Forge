@@ -91,6 +91,8 @@ export interface ToolContext {
     rootPath: string;     // absolute path on the executing machine
     machineLabel: string; // e.g. "This computer", "Station", "Portable", "Windows Dell"
     platform: string;
+    projectName?: string;
+    knownTree?: string;
   };
   // Milestone 3: durable project memory + shared coordination surfaces.
   // Optional so mock hosts and older companions degrade with clear messages.
@@ -183,6 +185,9 @@ export type AgentEvent =
   | { type: 'auto_steering'; trigger: string; text: string }
   | { type: 'paused'; turn: number; reason?: string; note?: string }
   | { type: 'stall_detected'; tool: string; attempts: number; message: string }
+  // Milestone 4: outcome-aware recovery ladder + honest stalled verdict
+  | { type: 'recovery_action'; action: 'workspace_refocus' | 'strategy_directive'; stallClass: string; step: number; message: string }
+  | { type: 'stalled'; message: string }
   | { type: 'escalation'; fromModel: string; toModel?: string; reason: string }
   // Forge upgrade — Problem D: evidence-gated completion
   | { type: 'completion_gate'; status: CompletionStatus; missing: string[]; detail: string; overridden?: boolean }
