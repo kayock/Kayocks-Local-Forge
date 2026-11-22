@@ -7,7 +7,7 @@ no Python, no PowerShell required for normal use.
 
 | File | What it is |
 | --- | --- |
-| `LocalForge-Companion-Setup-<version>.exe` | Per-user installer (NSIS). ~25 MB. |
+| `LocalForge-Companion-Setup-<version>.exe` | Per-user unsigned NSIS installer (download size varies). |
 | `LocalForgeCompanion\localforge-companion.exe` | The companion service with the Bun runtime **embedded** — a single ~93 MB exe, nothing else to install. |
 | `LocalForgeCompanion\LocalForgeTray.exe` | Tray GUI: status, pairing code (+Copy), paired devices, authorized workspaces, detected local inference providers, Start / Stop / Restart / Open LocalForge. Native Win32 binary (~190 KB). |
 
@@ -78,23 +78,13 @@ entries; **the data folder is intentionally preserved** (delete
 | Model not discovered | Start your inference server first (Ollama/LM Studio/llama-server/Lemonade), then Discover again, or add the endpoint URL manually. LocalForge never installs servers or downloads models for you. |
 | Companion window flashes a console | It should not — the tray spawns it windowless. If you started it manually, the console IS the interface (pairing code is printed there). |
 
-## Verification status (honest labels)
+## Verification status — v0.5.0 RC4
 
-- ✅ **Verified on Linux (build environment):** installer compiled with NSIS
-  3.11 (exit 0, payload files resolved); PE32+ x64 structure of both
-  executables; tray GUI subsystem=GUI (no console flash); NSIS firstheader
-  consistency; SHA-256 checksums; the website download URL serving byte-exact
-  installer; companion server behavior (pairing, CORS + Private-Network
-  preflight for the published HTTPS origin, streaming, chat proxy, tool calls)
-  by 27 automated companion tests.
-- ⚠️ **UNVERIFIED — requires a real Windows 10/11 x64 machine:** installer
-  run (install/upgrade/uninstall), tray GUI operation, `taskkill` child-tree
-  cleanup, Start-Menu shortcut resolution, SmartScreen dialog text, autostart
-  entry, and a live pairing session from Chrome/Edge on Windows to the
-  published HTTPS site with a real local model server. The code paths are the
-  same ones covered by the automated tests (cmd.exe wrapper, marker parsing,
-  screening lists are unit-covered), but per Microsoft's own guidance nothing
-  counts as "tested on Windows" until it has run on Windows.
+- ✅ **Automated Windows runner end-to-end verification PASSED:** The [authoritative Windows installer run](https://github.com/kayock/Kayocks-Local-Forge/actions/runs/45042085932) built the installer on Windows, verified its SHA-256 hash, installed it silently, resolved Start Menu shortcuts, launched the **installed** Companion, paired the browser client, launched a real PowerShell ConPTY session, verified cwd/environment persistence across separate commands, terminal resize, **Ctrl+C interrupt recovery**, PTY cleanup and uninstallation. The installed tray process started on the runner, though full interactive tray UI is not verified.
+- ✅ **Companion and IDE CI PASSED:** the [production build and cross-build smoke workflow](https://github.com/kayock/Kayocks-Local-Forge/actions/runs/45042085906) and [Companion control plane](https://github.com/kayock/Kayocks-Local-Forge/actions/runs/45042089924) completed successfully.
+- ⚠️ **Still needs real-user testing:** Windows 10/11 hardware, interactive tray menus, SmartScreen experience, upgrade of an existing installation, real inference/model discovery, and multi-machine LAN workflows. A hosted Windows CI run is not equivalent to full desktop acceptance testing.
+
+The GitHub [v0.5.0 RC4 prerelease](https://github.com/kayock/Kayocks-Local-Forge/releases/tag/v0.5.0-rc4) provides the **unsigned, Windows-built and verified installer** plus `SHA256SUMS.txt`. Do not confuse this with the Linux cross-compiled preview candidate.
 
 ## For developers
 
