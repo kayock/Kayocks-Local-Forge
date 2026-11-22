@@ -17,7 +17,7 @@ function workspaceBlock(ctx: WorkspaceContext): string {
     [
       'WORKSPACE (authoritative — re-anchor here; do not re-derive by probing):',
       `  root (absolute): ${ctx.workspacePath}`,
-      `  platform: ${ctx.platform}`,
+      `  Platform: ${ctx.platform}`,
       ctx.machineLabel ? `  machine: ${ctx.machineLabel}` : '',
       ctx.projectName ? `  Selected project: ${ctx.projectName}` : '',
       ctx.tree ? `  known top-level structure:\n${ctx.tree}` : '',

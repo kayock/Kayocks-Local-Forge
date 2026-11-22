@@ -93,7 +93,14 @@ const server = http.createServer(async (req, res) => {
     const system = Array.isArray(parsed.messages)
       ? (parsed.messages.find((m) => m.role === 'system')?.content ?? '')
       : '';
-    requests.push({ system: String(system ?? ''), hasTools: Array.isArray(parsed.tools) && parsed.tools.length > 0, at: Date.now() });
+    requests.push({
+      system: String(system ?? ''),
+      hasTools: Array.isArray(parsed.tools) && parsed.tools.length > 0,
+      messages: Array.isArray(parsed.messages) ? parsed.messages : [],
+      tools: Array.isArray(parsed.tools) ? parsed.tools : [],
+      model: parsed.model ?? null,
+      at: Date.now(),
+    });
     const payload = completion(nextEntry());
     if (parsed.stream) return sse(res, payload);
     res.writeHead(200, { 'Content-Type': 'application/json' });

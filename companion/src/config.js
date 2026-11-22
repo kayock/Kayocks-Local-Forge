@@ -150,6 +150,14 @@ export function newToken() {
   return crypto.randomBytes(32).toString('hex');
 }
 
+// Diagnostic seam (documented in tests): LF_REPORT_PLATFORM lets a Linux CI
+// host honestly report 'win32'/'darwin' through the REPORTING routes only —
+// shell selection, exec and FS behavior always use the real process.platform.
+export function reportPlatform() {
+  const r = String(process.env.LF_REPORT_PLATFORM || '').toLowerCase().trim();
+  return ['linux', 'win32', 'darwin'].includes(r) ? r : process.platform;
+}
+
 export function resetPairingCode() {
   state.pairingCode = newPairingCode();
   saveState();

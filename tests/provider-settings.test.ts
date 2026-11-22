@@ -20,7 +20,10 @@ function seed() {
     providers: [saved({}), saved({ id: 'p_ollama', kind: 'ollama', baseUrl: 'http://127.0.0.1:11434', label: 'Ollama', serverType: 'Ollama', models: [{ id: 'nemotron-cascade2:30b-a3b' }, { id: 'qwen3-coder:7b' }] })],
     activeProviderId: null,
     model: '',
-  });
+    // full-run isolation: earlier suite files mutate the shared companion
+    // config — this suite pins the exact precondition its assertions rely on
+    companion: { ...useSettings.getState().companion, mode: 'direct', directUrl: 'http://127.0.0.1:7337', token: null },
+  } as any);
 }
 
 beforeEach(() => seed());

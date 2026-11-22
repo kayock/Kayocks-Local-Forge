@@ -389,8 +389,9 @@ export class Coordinator {
    * on the SAME machine/model with its own protocol and a fresh allowance,
    * seeded with the prior summary so completed work is not redone.
    */
-  async continueStage(stage: StageId): Promise<{ summary: string; turns: number; assignment: AgentAssignment } | null> {
-    const prior = this.lastRunResults.find((r) => r.stage === stage);
+  async continueStage(stage: StageId, currentResults?: CoordinatorReport['results']): Promise<{ summary: string; turns: number; assignment: AgentAssignment } | null> {
+    const pool = currentResults && currentResults.length ? currentResults : this.lastRunResults;
+    const prior = pool.find((r) => r.stage === stage);
     if (!prior) return null;
     const target = this.cfg.machines.find((m) => m.machineName === prior.machine && m.model === prior.model)
       ?? this.cfg.machines[0];
@@ -405,7 +406,9 @@ export class Coordinator {
       ``,
       `Continue from the current workspace state. Do not redo verified work.`,
     ].filter(Boolean).join('\n');
-    const { r, assignment } = await this.runAgent(stage === 'coder' ? 'debugger' : stage, target, task, []);
+    // Continuation preserves the ORIGINAL stage target (same machine, model,
+    // tool protocol) — the debugger-role remap is only for repair reassignment.
+    const { r, assignment } = await this.runAgent(stage, target, task, []);
     return { summary: r.content || r.note || '(no summary returned)', turns: r.turns, assignment };
   }
 
@@ -435,6 +438,8 @@ export class Coordinator {
       ``,
       `Continue from the current workspace state. Verify what exists before changing it.`,
     ].filter(Boolean).join('\n');
+    // Reassignment remaps a failed coder to the DEBUGGER role (repair
+    // semantics) with the replacement's own target/protocol/turns.
     const { r, assignment } = await this.runAgent(stage === 'coder' ? 'debugger' : stage, target, task, []);
     return { summary: r.content || r.note || '(no summary returned)', turns: r.turns, assignment };
   }
@@ -468,7 +473,11 @@ export class Coordinator {
       coderSummary = coderRun.r.content || coderRun.r.note || '(no summary returned)';
       results.push({ stage: 'coder', assignmentId: coderRun.assignment.id, agentId: coderRun.assignment.agentId, machine: coderAssign.target.machineName, model: coderAssign.target.model, summary: coderSummary, turns: coderRun.r.turns, conflict: coderRun.conflict, escalated: false, hitTurnLimit: coderRun.r.hitTurnLimit });
       if (coderRun.conflict) conflicts.push(coderRun.conflict);
-      if (coderRun.r.paused) return this.report(results, 'UNKNOWN', reworkUsed, totalTurns, conflicts, 'paused');
+      // Turn limit ≠ user pause: the pipeline still proceeds to verification
+      // with the partial progress recorded honestly (the user can resume the
+      // stage explicitly via continueStage — the recorded summary explains
+      // exactly where it stopped). A user pause (no hitTurnLimit) stops the run.
+      if (coderRun.r.paused && !coderRun.r.hitTurnLimit) return this.report(results, 'UNKNOWN', reworkUsed, totalTurns, conflicts, 'paused');
 
       // 3. TESTER (may run on a different machine — e.g. the GPU worker)
       const testerAssign = await this.assignStage('tester', explicitTargets?.tester);
@@ -477,7 +486,7 @@ export class Coordinator {
       testReport = testerRun.r.content || testerRun.r.note || '(no summary returned)';
       results.push({ stage: 'tester', assignmentId: testerRun.assignment.id, agentId: testerRun.assignment.agentId, machine: testerAssign.target.machineName, model: testerAssign.target.model, summary: testReport, turns: testerRun.r.turns, conflict: testerRun.conflict, escalated: false, hitTurnLimit: testerRun.r.hitTurnLimit });
       if (testerRun.conflict) conflicts.push(testerRun.conflict);
-      if (testerRun.r.paused) return this.report(results, 'UNKNOWN', reworkUsed, totalTurns, conflicts, 'paused');
+      if (testerRun.r.paused && !testerRun.r.hitTurnLimit) return this.report(results, 'UNKNOWN', reworkUsed, totalTurns, conflicts, 'paused');
 
       // 4. REVIEWER (+ escalation-aware rework)
       const reviewerAssign = await this.assignStage('reviewer', explicitTargets?.reviewer);

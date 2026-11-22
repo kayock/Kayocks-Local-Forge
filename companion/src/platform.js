@@ -1,5 +1,6 @@
 // Read-only, best-effort inventory. A missing GPU utility means 'unknown', not 'no GPU'.
 import os from 'node:os';
+import { reportPlatform } from './config.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 const exec = promisify(execFile);
@@ -40,7 +41,7 @@ export async function hardwareInventory() {
     }
   }
   return {
-    platform: process.platform, platformVersion: os.release(), arch: process.arch,
+    platform: reportPlatform(), platformVersion: os.release(), arch: process.arch,
     hostname: os.hostname(), cpuModel: cpu[0]?.model || null, cpuCores: cpu.length,
     ramTotalBytes: cap(os.totalmem()), ramAvailableBytes: cap(os.freemem()),
     gpus, npu: { detected: false, runtime: null, detail: 'Not probed; absence is not verified' },

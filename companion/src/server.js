@@ -21,6 +21,7 @@ import {
   config, VERSION, ensureHome, loadState, getState, saveState,
   addToken, log, upsertWorkspace, removeWorkspace, findWorkspace, workspaceId,
   isTokenValid, resetPairingCode, writeStatus,
+  reportPlatform,
 } from './config.js';
 import { sendJson, readBody, handlePreflight, withCors } from './http-utils.js';
 import { handlePair, authOk, extractToken } from './auth.js';
@@ -94,7 +95,7 @@ const server = http.createServer(async (req, res) => {
       const osmod = await import('node:os');
       return sendJson(res, 200, {
         ok: true, name: 'localforge-companion', version: VERSION,
-        platform: process.platform, host: config.host, port: config.port,
+        platform: reportPlatform(), host: config.host, port: config.port,
         paired: getState().tokens.length > 0,
         workspaces: getState().workspaces.map((w) => ({ id: w.id, name: w.name, path: w.path })),
         resources: {

@@ -493,9 +493,15 @@ export class AgentRunner {
     if (prev && !REPEAT_EXEMPT.has(name) && prev.workspaceVersion === this.workspaceVersion) {
       const reads = READ_TOOLS.has(name);
       const limit = prev.status === 'ok' ? (reads ? REPEAT_LIMIT_READS : REPEAT_LIMIT_DEFAULT) : REPEAT_LIMIT_FAILED;
-      if (prev.count >= limit) {
+      const emptyButOk = prev.outcome === 'ok-empty';
+      // A successful COMMAND with empty output (exit 0, no stdout) is exempt
+      // from repetition blocking: it cannot be "re-derived" for new info, the
+      // per-agent turn limit remains the hard bound, and stage agents with
+      // scripted no-op warmups must reach their OWN turn limits (Test E).
+      // READ tools returning MISSING/EMPTY are NOT exempt — a discovery loop
+      // on a missing path is exactly the repetition stall the guard exists for.
+      if (prev.count >= limit && !(emptyButOk && FS_MAYBE_WRITERS.has(name))) {
         prev.blocked++;
-        const emptyButOk = prev.outcome === 'ok-empty';
         const changedHint = prev.status === 'ok'
           ? 'Repeating it cannot produce new information.'
           : 'Repeating the exact same failing call with identical arguments will fail identically.';
@@ -1237,6 +1243,11 @@ function capOutput(s: string) {
 // and blocked calls are activity, never progress.
 function callProgressed(entry: ToolLogEntry): boolean {
   if (entry.status !== 'ok' || entry.outcome === 'blocked') return false;
+  // An exit-0 command with EMPTY output (e.g. `true`, `cd x`) is forward motion
+  // for the stall clock only: the hard per-agent turn limit stays the safety
+  // net, and the repetition guard below does not block it either. Discovery
+  // loops (nonempty outputs, errors) still count as stalls (Phase 2 tests).
+  if (entry.outcome === 'ok-empty' && FS_MAYBE_WRITERS.has(entry.tool)) return true;
   // Measurable progress = real state changes or PASSING verification. The
   // FS_MAYBE_WRITERS branch marks commands fsChanged=true for journaling, so
   // progress must classify by TOOL here: a bare `ls -la` success is activity
@@ -1266,6 +1277,21 @@ function stableArgs(args: Record<string, any>): string {
 // are successful results that carry no new information — the journal records
 // them as ok-empty so recovery guidance can say so explicitly.
 function classifyEmpty(tool: string, output: string): 'ok-empty' | 'ok-nonempty' {
+  // Commands: exit 0 with NO stdout content is a genuinely empty success
+  // (`true`, `cd x`) — distinct from a discovery command that returned data.
+  if (tool === 'run_command' || tool === 'launch_app') {
+    const exit = exitFromOutput(output);
+    if (exit === 0) {
+      const body = output
+        .replace(/^exit code: .*$/gim, '')
+        .replace(/^cwd: .*$/gim, '')
+        .replace(/^duration: .*$/gim, '')
+        .replace(/^\$ .*$/gim, '')
+        .replace(/^\[Timed out[^\]]*\]$/gim, '')
+        .trim();
+      if (!body) return 'ok-empty';
+    }
+  }
   if (READ_TOOLS.has(tool) || tool === 'run_tests') {
     if (/^\(empty directory|^EMPTY:|^MISSING:|^No matches|^No detached processes|^No entries returned|No test command could be auto-detected|^No dependency manifest/.test(output.trim())) {
       return 'ok-empty';
