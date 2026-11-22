@@ -35,9 +35,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Node 24 provides node:sqlite for the full memory + FTS integration suite.
+      # The Companion still supports Node 20 through its durable JSON fallback.
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -160,7 +162,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
 
       - name: Download THE built installer artifact
         uses: actions/download-artifact@v4

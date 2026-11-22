@@ -144,7 +144,13 @@ test('workspace open → file write/read → tree', async () => {
 
   const tree = await req('GET', `/api/ws/${wsId}/tree`);
   assert.ok(tree.json.entries.some((e) => e.path === 'src/main.py'));
-  assert.equal(tree.json.root, path.resolve(workspace));
+  // Windows temp paths may use 8.3 short names while the server returns the
+  // canonical long path. Assert they point to the same real workspace.
+  const canonicalRoot = fs.realpathSync.native(workspace);
+  assert.equal(
+    process.platform === 'win32' ? tree.json.root.toLowerCase() : tree.json.root,
+    process.platform === 'win32' ? canonicalRoot.toLowerCase() : canonicalRoot,
+  );
 });
 
 test('REAL /stat endpoint: missing vs empty vs file', async () => {

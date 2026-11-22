@@ -243,7 +243,11 @@ export function readMemory(wsId, id) {
 }
 
 function memoryOut(m) {
-  return { ...m, tags: JSON.parse(m.tags || '[]'), pinned: !!m.pinned, superseded: !!m.superseded };
+  // SQLite stores tags as JSON text; the JSON fallback stores native arrays.
+  // Parsing an array as JSON throws (e.g. "storage,architecture"), causing
+  // HTTP 500 on memory reads/search when node:sqlite is unavailable.
+  const tags = Array.isArray(m.tags) ? m.tags : JSON.parse(m.tags || '[]');
+  return { ...m, tags, pinned: !!m.pinned, superseded: !!m.superseded };
 }
 
 export function updateMemory(wsId, id, patch) {

@@ -256,7 +256,12 @@ describe('Milestone 1 — diff preview + overwrite protection + exec log', () =>
 
   test('exec returns an execLogId and the full log endpoint serves it', async () => {
     const big = Array.from({ length: 2000 }, (_, i) => `line ${i}`).join('\n');
-    const r = await req2('POST', `/api/ws/${wsId2}/exec`, { cmd: `echo "${big.slice(0, 3000)}"` });
+    // Windows cmd.exe interprets embedded newlines as separate commands.
+    // Produce a genuinely multi-line command output on either shell.
+    const cmd = process.platform === 'win32'
+      ? 'for /L %i in (0,1,1999) do @echo line %i'
+      : `echo "${big.slice(0, 3000)}"`;
+    const r = await req2('POST', `/api/ws/${wsId2}/exec`, { cmd });
     assert.equal(r.status, 200);
     assert.ok(r.json.execLogId, 'execLogId missing from exec response');
     const log = await req2('GET', `/api/ws/${wsId2}/exec/log?id=${r.json.execLogId}`);
