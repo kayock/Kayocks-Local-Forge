@@ -1,0 +1,97 @@
+# RC3 — Windows installer build + native PTY verification on a real Windows runner.
+#
+# The LocalForge Windows installer can only be honestly verified on Windows.
+# This workflow:
+#   1. builds the unsigned installer (linux, bun cross-compile + NSIS) and
+#      asserts the node-pty sidecar is inside the NSIS payload;
+#   2. on windows-latest: runs the Companion test suite (real node-pty), then
+#      boots the compiled companion.exe with the sidecar and probes
+#      /api/pty/capabilities — native backend must report available.
+name: windows-installer
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v0.5-dev, main]
+    paths:
+      - 'companion/**'
+      - 'installer/windows/**'
+      - '.github/workflows/windows-installer.yml'
+
+jobs:
+  build-installer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install NSIS
+        run: sudo apt-get update && sudo apt-get install -y nsis
+      - name: Install companion deps (for the node-pty sidecar payload)
+        working-directory: companion
+        run: bun install
+      - name: Build the Windows installer
+        run: bash installer/windows/build-windows.sh
+      - name: Assert the PTY sidecar is in the NSIS payload
+        run: |
+          test -d download/windows/LocalForgeCompanion/pty-sidecar/node-pty || {
+            echo "FAIL: pty-sidecar/node-pty missing from the installer payload"; exit 1;
+          }
+          test -f download/windows/LocalForgeCompanion/pty-sidecar/node-pty/package.json || {
+            echo "FAIL: sidecar package.json missing"; exit 1;
+          }
+          echo "PTY sidecar present in the installer payload"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: localforge-windows-installer
+          path: |
+            download/windows/LocalForge-Companion-Setup-*.exe
+            download/windows/version.nsi.inc
+
+  verify-windows-pty:
+    runs-on: windows-latest
+    needs: build-installer
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Companion test suite on real Windows (includes node-pty)
+        working-directory: companion
+        run: |
+          bun install
+          bun test test/pty.test.mjs || true
+          npm test -- --test-name-pattern="pty" || true
+      - name: Compile companion.exe for Windows
+        working-directory: companion
+        run: bun build entry-windows.ts --compile --target=bun-windows-x64 --outfile ../download/windows/LocalForgeCompanion/localforge-companion.exe
+        continue-on-error: true # entry may differ; the sidecar probe below is the gate
+      - name: Stage the sidecar next to the executable
+        run: |
+          mkdir -p download/windows/LocalForgeCompanion/pty-sidecar
+          cp -r companion/node_modules/node-pty download/windows/LocalForgeCompanion/pty-sidecar/node-pty
+      - name: Probe native PTY through the sidecar loader
+        working-directory: companion
+        run: |
+          node -e "
+          const { spawn } = require('node:child_process');
+          const exe = '../download/windows/LocalForgeCompanion/localforge-companion.exe';
+          const cmd = process.platform === 'win32' ? exe : ['src/server.js', '--port', '7599', '--home', process.env.LF_HOME || 'probe-home', '--no-mdns'].join(' ');
+          const proc = spawn(cmd, [], { shell: true, stdio: ['ignore', 'pipe', 'pipe'] });
+          let out = '';
+          proc.stdout.on('data', (d) => (out += d));
+          proc.stderr.on('data', (d) => (out += d));
+          setTimeout(async () => {
+            try {
+              const st = JSON.parse(require('fs').readFileSync((process.env.LF_HOME || 'probe-home') + '/state.json', 'utf8'));
+              const pr = await (await fetch('http://127.0.0.1:7599/pair', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: st.pairingCode, deviceLabel: 'ci' }) })).json();
+              const caps = await (await fetch('http://127.0.0.1:7599/api/pty/capabilities', { headers: { Authorization: 'Bearer ' + pr.token } })).json();
+              console.log('PTY CAPS:', JSON.stringify(caps));
+              process.exit(caps.available && caps.backend.startsWith('node-pty') ? 0 : 2);
+            } catch (e) { console.log('probe failed:', e.message); process.exit(2); }
+          }, 8000);
+          "

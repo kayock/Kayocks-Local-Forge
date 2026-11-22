@@ -2,8 +2,15 @@
 
 # LocalForge IDE
 
-> **v0.5.0 release candidate** (`v0.5-dev`) — real PTY terminals (node-pty + packaged sidecar), mDNS LAN discovery, cross-machine fan-out orchestration (Control Center), durable SQLite project memory, outcome-aware recovery, Live Runs / Fleet Map / Memory / Diagnostics surfaces.
-> Build: `npm install && npm run build && npm start` · Tests: `bun test tests/` + `cd companion && npm test`
+> **v0.5.0 release candidate** (`v0.5-dev`) — Cline-class autonomous coding on a private multi-agent mesh:
+> • Real PTY terminals (node-pty; packaged sidecar for the compiled Windows binary; NDJSON fallback preserved)
+> • Plan/Act working modes with an observe→reason→act→verify discipline and evidence-gated completion
+> • Durable, searchable, resumable task sessions + shadow-git checkpoints with safe rollback
+> • Repository awareness (workspace map) and project rules/skills (`.localforge/`)
+> • mDNS LAN discovery, cross-machine parallel fan-out with dependency-aware task graphs, durable SQLite project memory
+> • Live Runs / Fleet Map / Memory / Diagnostics surfaces, transparent approvals, user steering
+>
+> Build: `npm install && npm run build && npm start` · Tests: `bun test tests/` + `cd companion && npm test` · Windows installer CI: `.github/workflows/windows-installer.yml`
 
 **Your models. Your machine. Your IDE.**
 
