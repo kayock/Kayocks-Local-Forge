@@ -12,6 +12,7 @@ import {
   statPath, readFileContent, extractArchive,
 } from '../src/fsapi.js';
 import { mintPreviewToken, handlePreview } from '../src/preview.js';
+import { saveBrowserScreenshot } from '../src/browser.js';
 
 async function withWorkspace(fn) {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'localforge-fs-boundary-'));
@@ -130,5 +131,17 @@ test('static preview refuses files outside its preview directory', async () => {
     const allowed = await request('index.html');
     assert.equal(allowed.status, 200);
     assert.equal(allowed.body, '<h1>safe</h1>');
+  });
+});
+
+
+test('browser screenshot writes respect authorized workspace paths', async () => {
+  await withWorkspace(async ({ ws, root, outside }) => {
+    await fsp.symlink(outside, path.join(root, 'export'), 'dir');
+    await expectBoundary(saveBrowserScreenshot(ws, 'export/private.png', Buffer.from('not-a-png')));
+    assert.equal(fs.existsSync(path.join(outside, 'private.png')), false);
+    const result = await saveBrowserScreenshot(ws, 'shots/preview.png', Buffer.from('test-bytes'));
+    assert.equal(result.bytes, 10);
+    assert.equal(await fsp.readFile(path.join(root, 'shots/preview.png'), 'utf8'), 'test-bytes');
   });
 });

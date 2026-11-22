@@ -15,7 +15,7 @@ import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { resolveInWorkspace } from './fsapi.js';
+import { resolveInWorkspace, assertInsideReal } from './fsapi.js';
 
 const sessions = new Map(); // wsId -> session
 
@@ -237,16 +237,22 @@ export async function browserEval(ws, expression) {
   return { ok: true, value: r.result?.value, type: r.result?.type, consoleErrors: [...s.cdp.consoleErrors] };
 }
 
+// Keep screenshot writes under the same realpath boundary checks as the
+// file editor. Only accept binary bytes from the local DevTools session.
+export async function saveBrowserScreenshot(ws, savePath, bytes) {
+  const abs = resolveInWorkspace(ws, savePath);
+  await assertInsideReal(ws, abs);
+  await fsp.mkdir(path.dirname(abs), { recursive: true });
+  await assertInsideReal(ws, abs);
+  await fsp.writeFile(abs, bytes);
+  return { ok: true, savedTo: savePath, bytes: bytes.length };
+}
+
 export async function browserScreenshot(ws, savePath) {
   const s = sessions.get(ws.id);
   if (!s) return { unavailable: 'No browser session is open. Call browser open first.' };
   const shot = await s.cdp.send('Page.captureScreenshot', { format: 'png' });
-  if (savePath) {
-    const abs = resolveInWorkspace(ws, savePath);
-    await fsp.mkdir(path.dirname(abs), { recursive: true });
-    await fsp.writeFile(abs, Buffer.from(shot.data, 'base64'));
-    return { ok: true, savedTo: savePath, bytes: Math.round(shot.data.length * 0.75) };
-  }
+  if (savePath) return saveBrowserScreenshot(ws, savePath, Buffer.from(shot.data, 'base64'));
   return { ok: true, dataBase64: shot.data.slice(0, 100) + '…', bytes: Math.round(shot.data.length * 0.75), note: 'Pass a path to save the full screenshot into the workspace.' };
 }
 
@@ -258,6 +264,11 @@ export async function browserVerify(ws, { url, checks = [], saveScreenshot, time
   if (open.unavailable) return open;
   const nav = await browserNavigate(ws, url);
   if (nav.unavailable) return nav;
+  // browserVerify must read the active session after opening/navigating.
+  // Previously this variable was undefined, causing HTTP 500 whenever Chrome
+  // was available (CI caught it; browserless local tests could not).
+  const s = sessions.get(ws.id);
+  if (!s) return { unavailable: 'Browser session closed during verification.' };
 
   const results = [];
   for (const c of checks.slice(0, 12)) {
