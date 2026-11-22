@@ -2,7 +2,8 @@
 # Build the LocalForge Windows companion installer artifacts on Linux:
 #   1. localforge-companion.exe — standalone companion (Bun runtime embedded)
 #   2. LocalForgeTray.exe       — native Win32 tray GUI (zig cc, no runtime)
-#   3. LocalForge-Companion-Setup-<ver>.exe — NSIS per-user installer
+#   3. LocalForgePtyInterrupt.exe — scoped Windows ConPTY Ctrl+C helper (zig cc)
+#   4. LocalForge-Companion-Setup-<ver>.exe — NSIS per-user installer
 # Outputs land in download/windows/ and are copied to public/downloads/ for
 # the published site.
 #
@@ -39,7 +40,7 @@ command -v bun >/dev/null || { echo "Missing Bun compiler" >&2; exit 1; }
 
 mkdir -p "$OUT/LocalForgeCompanion" "$PUB"
 
-echo "== 1/3 companion.exe (bun --compile, windows-x64) =="
+echo "== 1/4 companion.exe (bun --compile, windows-x64) =="
   # Milestone P1: bundle the prebuilt node-pty sidecar next to the executable.
   # The compiled binary cannot embed native modules; at runtime the companion
   # loads node-pty from <exe-dir>/pty-sidecar/node-pty (loader verified on
@@ -61,7 +62,7 @@ bun build installer/windows/entry-companion.ts \
   --outfile "$OUT/LocalForgeCompanion/localforge-companion.exe" \
   --define 'process.env.NODE_ENV:"production"'
 
-echo "== 2/3 tray GUI (zig cc, windows-x64) =="
+echo "== 2/4 tray GUI (zig cc, windows-x64) =="
 "$ZIG" cc -target x86_64-windows-gnu -O2 -Wno-unused-function \
   -o "$OUT/LocalForgeCompanion/LocalForgeTray.exe" \
   installer/windows/tray_main.c \
@@ -70,7 +71,15 @@ echo "== 2/3 tray GUI (zig cc, windows-x64) =="
 # tray never flashes a console window.
 python3 scripts/pe-set-gui-subsystem.py "$OUT/LocalForgeCompanion/LocalForgeTray.exe"
 
-echo "== 3/3 NSIS installer =="
+echo "== 3/4 ConPTY Ctrl+C helper (zig cc, windows-x64) =="
+# Keep the Linux preview's NSIS payload structurally consistent with the
+# authoritative native-Windows installer. The helper is not a Linux binary.
+"$ZIG" cc -target x86_64-windows-gnu -O2 -Wall -Wextra -municode \
+  -o "$OUT/LocalForgeCompanion/LocalForgePtyInterrupt.exe" \
+  installer/windows/pty-interrupt.c
+test -s "$OUT/LocalForgeCompanion/LocalForgePtyInterrupt.exe"
+
+echo "== 4/4 NSIS installer =="
 cat > "$OUT/version.nsi.inc" <<EOF
 !define LF_VERSION "$VER"
 EOF
