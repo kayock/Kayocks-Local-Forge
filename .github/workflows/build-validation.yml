@@ -71,6 +71,7 @@ jobs:
   windows-installer-smoke:
     needs: windows-installer-candidate
     runs-on: windows-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -78,14 +79,28 @@ jobs:
           path: candidate
       - name: Test silent installation and bundled Companion startup
         shell: pwsh
+        timeout-minutes: 4
         run: |
           $ErrorActionPreference = 'Stop'
           $installer = (Get-ChildItem -Path candidate -Filter 'LocalForge-Companion-Setup-*.exe' | Select-Object -First 1).FullName
           if (-not $installer) { throw 'Windows installer missing' }
-          $result = Start-Process -FilePath $installer -ArgumentList '/S' -Wait -PassThru
-          if ($result.ExitCode -ne 0) { throw "Silent installer exit code $($result.ExitCode)" }
+          # Start-Process -Wait waits for the entire descendant tree on Windows;
+          # an installer that starts its tray could make CI wait forever.
+          $install = Start-Process -FilePath $installer -ArgumentList '/S' -PassThru
+          if (-not $install.WaitForExit(60000)) {
+            Stop-Process -Id $install.Id -Force -ErrorAction SilentlyContinue
+            throw 'Silent Windows installer did not exit within 60 seconds'
+          }
+          if ($install.ExitCode -ne 0) { throw "Silent installer exit code $($install.ExitCode)" }
           $bin = Join-Path $env:LOCALAPPDATA 'Programs\LocalForge Companion\LocalForgeCompanion\localforge-companion.exe'
           if (-not (Test-Path $bin)) { throw "Bundled companion not installed: $bin" }
-          $output = (& $bin --help 2>&1 | Out-String)
-          if ($LASTEXITCODE -ne 0 -or $output -notmatch 'Usage: localforge-companion') { throw "Bundled companion startup failed: $output" }
+          $stdout = Join-Path $env:TEMP 'localforge-help-out.txt'
+          $stderr = Join-Path $env:TEMP 'localforge-help-err.txt'
+          $help = Start-Process -FilePath $bin -ArgumentList '--help' -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          if (-not $help.WaitForExit(30000)) {
+            Stop-Process -Id $help.Id -Force -ErrorAction SilentlyContinue
+            throw 'Bundled companion --help did not exit within 30 seconds'
+          }
+          $output = (Get-Content $stdout -Raw) + (Get-Content $stderr -Raw)
+          if ($help.ExitCode -ne 0 -or $output -notmatch 'Usage: localforge-companion') { throw "Bundled companion startup failed: $output" }
           Write-Host 'Windows installer candidate and companion --help smoke test passed.'
