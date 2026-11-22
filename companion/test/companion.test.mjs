@@ -157,4 +157,7 @@ test('CLI option parsing supports Node.js scripts and Bun standalone executables
   assert.equal(compiledArgs.showCode, true);
   assert.equal(parseArgs(['C:\\LocalForgeCompanion\\localforge-companion.exe', '--help']).help, true);
   assert.equal(parseArgs(['node', '/repo/companion/src/server.js', '--help']).help, true);
+  // Bun variants can expose an additional compiled:// entry before real args.
+  assert.equal(parseArgs(['bun', 'compiled://root/entry.js', 'localforge-companion.exe', '--help']).help, true);
+  assert.deepEqual(parseArgs(['bun', 'compiled://root/entry.js', 'localforge-companion.exe', ...opts]), nodeArgs);
 });

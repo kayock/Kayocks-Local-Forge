@@ -7,13 +7,13 @@ import crypto from 'node:crypto';
 
 export const VERSION = '0.4.5';
 
-// node src/server.js: argv[1] is a script filename, options begin at [2].
-// Bun standalone .exe: argv[0] is the executable, options may begin at [1].
-// Recognize both formats so tray --home/--status-file/--port and --help work.
+// Node, Bun, and compiled executable launchers can include different numbers
+// of runtime/entry-point arguments. Scan every argv item after argv[0] for
+// known flags instead of guessing whether options start at index 1, 2, or 3.
+// Non-option arguments are ignored as before.
 export function parseArgs(argv) {
   const out = {};
-  const start = argv[1]?.startsWith('--') ? 1 : 2;
-  for (let i = start; i < argv.length; i++) {
+  for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--port') out.port = Number(argv[++i]);
     else if (a === '--host') out.host = argv[++i];
@@ -32,6 +32,11 @@ export function parseArgs(argv) {
 }
 
 const args = parseArgs(process.argv);
+if (process.env.LOCALFORGE_CI_ARGV_TRACE === '1') {
+  console.log('[localforge-ci-cli-flags]', JSON.stringify(process.argv.map((s, i) => ({
+    position: i, flag: typeof s === 'string' && s.startsWith('--') ? s : null,
+  }))));
+}
 
 export const config = {
   home: args.home || process.env.LOCALFORGE_HOME || defaultHome(),
