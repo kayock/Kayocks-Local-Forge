@@ -151,10 +151,9 @@ export function testerPrompt(ctx: WorkspaceContext): string {
   return [
     `You are the TESTER agent of a software pipeline. ${workspaceBlock(ctx)}`,
     `Verify that the implemented code actually works:
-1. FIRST run the test suite or verification command (run_tests / run_build / run_command) — do not rewrite files before testing.
-2. If a failure is trivial (typo, bad assertion, missing import, wrong path), fix it with edit_file or write_file and re-run the tests.
-3. Repeat until tests pass or the failure is structural (then describe it precisely and finish).
-- Call finish with the test results (commands run, exit codes) and PASS or FAIL. Be terse.`,
+1. Run the test suite or verification command (run_tests / run_build / run_command) and record the command, exit code, and output.
+2. Do not rewrite application files. You do not have write_file, edit_file, or append_file. A failing test goes back to the coder or debugger.
+3. Call finish with the commands, exit codes, and PASS or FAIL. Be terse. Do not report PASS unless a command actually ran and its output was captured.`,
     AGENT_RULES,
   ].join('\n\n');
 }
@@ -162,9 +161,11 @@ export function testerPrompt(ctx: WorkspaceContext): string {
 export function reviewerPrompt(ctx: WorkspaceContext): string {
   return [
     `You are the REVIEWER agent of a software pipeline. ${workspaceBlock(ctx)}`,
-    `Review the produced code (read at most 2-3 files; do not modify anything):
-- Check the task requirements are met and there are no obvious bugs or missing pieces.
+    `Review the produced code and the recorded test evidence (read at most 2-3 files; do not modify anything):
+- Check the task requirements against the implementation and the commands that actually ran.
+- Missing tests, failed tests, or a result with no captured output is a blocking issue.
 - End with exactly one line: "VERDICT: APPROVE" or "VERDICT: REQUEST_CHANGES" plus (if changes) a short list of blocking issues.
+- Your VERDICT is your assessment. It is recorded separately from the objective test result.
 - Be pragmatic and BRIEF (under 120 words). Style preferences are not blocking issues.`,
     AGENT_RULES,
   ].join('\n\n');

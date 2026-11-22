@@ -13,10 +13,10 @@ import { plannerPrompt, coderPrompt, testerPrompt, reviewerPrompt, type Workspac
 
 export type StageId = 'planner' | 'coder' | 'tester' | 'reviewer';
 
-const STAGE_TOOLS: Record<StageId, string[]> = {
+export const STAGE_TOOLS: Record<StageId, string[]> = {
   planner: ['finish'],
   coder: ['list_dir', 'read_file', 'write_file', 'edit_file', 'create_dir', 'search_project', 'run_command', 'launch_app', 'process_status', 'stop_process', 'install_dependencies', 'run_build', 'run_tests', 'finish'],
-  tester: ['list_dir', 'read_file', 'write_file', 'edit_file', 'search_project', 'run_command', 'launch_app', 'process_status', 'stop_process', 'install_dependencies', 'run_tests', 'run_build', 'finish'],
+  tester: ['list_dir', 'read_file', 'search_project', 'run_command', 'launch_app', 'process_status', 'stop_process', 'install_dependencies', 'run_tests', 'run_build', 'finish'],
   reviewer: ['list_dir', 'read_file', 'search_project', 'finish'],
 };
 

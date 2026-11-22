@@ -1053,6 +1053,8 @@ function CollaborateTab() {
           if (e.type === 'turn_start' && agentId) setAgents((a) => a[agentId] ? { ...a, [agentId]: { ...a[agentId], turns: a[agentId].turns + 1 } } : a);
           if (e.type === 'final' && agentId) setAgents((a) => a[agentId] ? { ...a, [agentId]: { ...a[agentId], state: 'done', lastOutput: (e.content || '').slice(0, 400) } } : a);
           if (e.type === 'notice') pushFeed(e.message);
+          if (e.type === 'thinking' && agentId) setAgents((a) => a[agentId] ? { ...a, [agentId]: { ...a[agentId], lastOutput: 'Thinking — no visible answer yet.' } } : a);
+          if (e.type === 'text_delta' && agentId) setAgents((a) => a[agentId] ? { ...a, [agentId]: { ...a[agentId], lastOutput: ((a[agentId].lastOutput === 'Thinking — no visible answer yet.' ? '' : a[agentId].lastOutput) || '') + e.v } } : a);
           if (e.type === 'auto_steering') {
             setAutoEvents((x) => [...x.slice(-30), { agentId, trigger: e.trigger, text: e.text }]);
             pushFeed(`automatic steering (${e.trigger}) delivered to ${agentId}`, { agentId });
@@ -1243,6 +1245,15 @@ function CollaborateTab() {
               {/* per-agent turn allowance (Fix 3) — empty = collaborative default */}
               <span className="text-[10px] text-muted-foreground ml-2">turns:</span>
               <Input className="h-6 w-[70px] text-[10px]" placeholder={String(settings.agentTurns)} value={p.maxTurns ?? ''} onChange={(e) => updParticipant(i, { maxTurns: e.target.value === '' ? undefined : (Math.max(1, Math.min(500, Math.round(Number(e.target.value) || 0))) || undefined) })} />
+              <span className="text-[10px] text-muted-foreground ml-2">thinking:</span>
+              <Select value={p.thinking || 'auto'} onValueChange={(v) => updParticipant(i, { thinking: v === 'auto' ? undefined : v as 'enabled' | 'disabled' })}>
+                <SelectTrigger className="w-[110px] h-6 text-[10px]"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="auto">Automatic</SelectItem>
+                  <SelectItem value="enabled">Enabled</SelectItem>
+                  <SelectItem value="disabled">Disabled</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
             {(endpointChoices[i] || []).length > 1 && (
               <div className="flex items-center gap-1.5 flex-wrap">
@@ -1353,7 +1364,11 @@ function CollaborateTab() {
       {/* 5. results */}
       {report && (
         <div className="rounded-lg border p-3 space-y-2 text-xs">
-          <p className="text-sm font-medium">Result — verdict: <Badge variant="outline" className={report.verdict === 'APPROVE' ? 'text-green-600 border-green-500/40' : 'text-yellow-600'}>{report.verdict}</Badge> · {report.totalTurns} turns · rework passes: {report.reworkPassesUsed}</p>
+          <p className="text-sm font-medium">Reviewer verdict: <Badge variant="outline" className={report.verdict === 'APPROVE' ? 'text-green-600 border-green-500/40' : 'text-yellow-600'}>{report.verdict}</Badge></p>
+          {report.objectiveAcceptance && (
+            <p className="text-sm">Objective acceptance: <Badge variant="outline" className={report.objectiveAcceptance.status === 'PASS' ? 'text-green-600 border-green-500/40' : 'text-yellow-600'}>{report.objectiveAcceptance.status}</Badge> <span className="text-muted-foreground">{report.objectiveAcceptance.reason}</span></p>
+          )}
+          <p className="text-muted-foreground">{report.totalTurns} turns · rework passes: {report.reworkPassesUsed}</p>
           {report.conflicts.length > 0 && (
             <div className="rounded-md border border-yellow-500/40 p-2 space-y-1">
               <p className="font-medium text-yellow-600">Conflicts detected (both change sets preserved)</p>

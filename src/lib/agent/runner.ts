@@ -142,6 +142,18 @@ const FS_WRITERS = new Set(['write_file', 'edit_file', 'create_dir', 'delete_pat
 const FS_MAYBE_WRITERS = new Set(['run_command', 'launch_app', 'stop_process', 'install_dependencies', 'run_tests', 'run_build']);
 const READ_TOOLS = new Set(['read_file', 'list_dir', 'search_project', 'process_status', 'workspace_info', 'workspace_map']);
 
+export interface RecordedTest {
+  command: string;
+  exitCode: number | null;
+  passed: boolean;
+  summary?: string;
+  output: string;
+  at: number;
+  machine?: string;
+  revision?: string | null;
+  tool: string;
+}
+
 export interface RunResult {
   content: string;
   turns: number;
@@ -155,6 +167,7 @@ export interface RunResult {
   completion?: CompletionResult;
   // Milestone 1: files this run actually wrote/edited (structured result)
   filesChanged: string[];
+  testsRun?: RecordedTest[];
   usage?: { promptTokens: number | null; completionTokens: number | null };
   // Milestone 4: true when the coordinator stopped the run honestly after
   // exhausting the recovery ladder (an actionable stopped state, not a hang)
@@ -188,7 +201,7 @@ export class AgentRunner {
   private workspaceVersion = 1;      // bumped by fs-changing operations
   private steeringQueue: string[] = [];
   private filesWritten = new Set<string>();
-  private testsRun: { command: string; exitCode: number | null; passed: boolean; summary?: string }[] = [];
+  private testsRun: RecordedTest[] = [];
   private browserSawUnavailable = false;
   private gateRefusals = 0;
   private lastCompletion: CompletionResult | undefined;
@@ -680,7 +693,7 @@ export class AgentRunner {
       }
       if (name === 'run_tests' || name === 'run_build' || /\b(test|pytest|unittest|npm test|cargo test|go test)\b/i.test(String(args.command ?? ''))) {
         const exit = exitFromOutput(entry.output);
-        if (exit !== null) this.testsRun.push({ command: String(args.command ?? name), exitCode: exit, passed: exit === 0 && !entry.output.includes('TIMED OUT'), summary: entry.output.slice(0, 400) });
+        if (exit !== null) this.testsRun.push({ command: String(args.command ?? name), exitCode: exit, passed: exit === 0 && !(entry.output || '').includes('TIMED OUT'), summary: (entry.output || '').slice(0, 400), output: entry.output || '', at: entry.startedAt, machine: entry.machine, revision: entry.workspaceRevision ?? null, tool: name });
       }
       if (/browser (unavailable|could not be launched)|no browser/i.test(entry.output)) this.browserSawUnavailable = true;
       // Problem D: browser evidence flows into the contract when the
@@ -1008,6 +1021,9 @@ export class AgentRunner {
       let streamedText = '';
       let endChunk: any = null;
       let usedNative = this.protocol !== 'text';
+      let thinkingNoted = false;
+      let firstVisibleAt: number | null = null;
+      const turnStarted = Date.now();
 
       // model-server resilience: transient connection errors are retried
       let res: Awaited<ReturnType<CompanionClient['chat']>> | null = null;
@@ -1022,11 +1038,22 @@ export class AgentRunner {
             params: cfg.params,
             signal: cfg.signal,
             onChunk: (c) => {
-              if (c.t === 'text' && c.v) {
-                if (attempt === 1) {
-                  streamedText += c.v;
-                  this.emit({ type: 'text_delta', v: c.v });
+              if (attempt !== 1) return;
+              if (c.t === 'thinking' && c.v) {
+                if (!thinkingNoted) {
+                  thinkingNoted = true;
+                  this.emit({ type: 'notice', message: 'Model is thinking. No visible answer yet.' });
                 }
+                this.emit({ type: 'thinking', v: c.v });
+                return;
+              }
+              if (c.t === 'text' && c.v) {
+                if (firstVisibleAt == null) {
+                  firstVisibleAt = Date.now();
+                  if (thinkingNoted) this.emit({ type: 'notice', message: `First visible response after ${((firstVisibleAt - turnStarted) / 1000).toFixed(1)}s.` });
+                }
+                streamedText += c.v;
+                this.emit({ type: 'text_delta', v: c.v });
               }
             },
           });
@@ -1221,7 +1248,7 @@ export class AgentRunner {
     }
 
     this.emit({ type: 'final', content: finalContent, turns: turn, note: finalNote, canContinue: hitTurnLimit || paused, completion: this.lastCompletion });
-    return { content: finalContent, turns: turn, note: finalNote, messages: this.messages, hitTurnLimit, paused, completion: this.lastCompletion, filesChanged: [...this.filesWritten], usage: this.usageTotal, stalled: stalledOut };
+    return { content: finalContent, turns: turn, note: finalNote, messages: this.messages, hitTurnLimit, paused, completion: this.lastCompletion, filesChanged: [...this.filesWritten], testsRun: this.testsRun, usage: this.usageTotal, stalled: stalledOut };
   }
 
   // finish handling with the completion gate (Problem D). Returns accepted +

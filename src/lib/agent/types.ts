@@ -175,6 +175,7 @@ export interface ToolLogEntry {
 export type AgentEvent =
   | { type: 'turn_start'; turn: number }
   | { type: 'text_delta'; v: string }
+  | { type: 'thinking'; v: string }
   | { type: 'text_final'; v: string }
   | { type: 'tool_start'; call: ToolCallDraft }
   | { type: 'tool_end'; call: ToolCallDraft; entry: ToolLogEntry }

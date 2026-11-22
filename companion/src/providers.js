@@ -330,6 +330,15 @@ function readBodyText(res, cap = 800) {
   });
 }
 
+// Native Ollama thinking control. OpenAI-compatible servers do not get this
+// field: their request shape is different and an unknown flag can fail the call.
+export function applyOllamaThinking(payload, params) {
+  if (!payload || !params) return payload;
+  if (params.think === 'enabled') payload.think = true;
+  else if (params.think === 'disabled') payload.think = false;
+  return payload;
+}
+
 export async function proxyChat(body, { write, onClose }) {
   const { provider, model, messages, tools, params = {} } = body;
   if (!provider?.baseUrl) throw new ChatProxyError('Missing provider.baseUrl');
@@ -369,6 +378,7 @@ export async function proxyChat(body, { write, onClose }) {
     // server's configured context or generation budget.
     if (params.maxTokensExplicit === true && params.maxTokens != null) payload.options.num_predict = params.maxTokens;
     if (params.numCtxExplicit === true && params.numCtx != null) payload.options.num_ctx = params.numCtx;
+    applyOllamaThinking(payload, params);
     if (tools?.length) {
       payload.tools = tools.map(openAiToolToOllama);
       payload.tool_choice = 'auto';
@@ -450,6 +460,7 @@ export async function proxyChat(body, { write, onClose }) {
       try { chunk = JSON.parse(line); } catch { return; }
       if (chunk.error) { write({ t: 'error', message: String(chunk.error) }); return; }
       const msg = chunk.message || {};
+      if (msg.thinking) write({ t: 'thinking', v: msg.thinking });
       if (msg.content) write({ t: 'text', v: msg.content });
       if (msg.tool_calls) {
         for (const tc of msg.tool_calls) {

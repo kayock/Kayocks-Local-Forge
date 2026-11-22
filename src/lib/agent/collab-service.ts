@@ -16,6 +16,7 @@ import { CompanionClient, type CompanionConfig } from '@/lib/companion/client';
 import { MeshClient } from '@/lib/mesh/client';
 import { useSettings } from '@/lib/store/settings';
 import { Coordinator, type AgentTarget, type CoordinatorReport } from '@/lib/agent/coordinator';
+import { collaborationRequiresExecution, evaluateObjectiveAcceptance } from '@/lib/agent/acceptance';
 import type { ProtocolSetting } from '@/lib/store/settings';
 import type { AgentEvent } from '@/lib/agent/types';
 import type { AgentAssignment, ModelInventory } from '@/lib/mesh-types';
@@ -44,6 +45,8 @@ export interface CollabParticipant {
   // Manual and controller machines run only when the user selects them
   // for this collaboration. That selection does not make them a retry target.
   explicitRun?: boolean;
+  // Absent on saved participants: automatic, which sends no thinking flag.
+  thinking?: 'auto' | 'enabled' | 'disabled';
 }
 
 export interface CollabTaskConfig {
@@ -107,6 +110,7 @@ const toTarget = (modelSizes: Record<string, number | null>, defaultTurns: numbe
       : p.toolProtocol,
     maxTurns: p.maxTurns ?? defaultTurns,
     allowAutomatic: allowAutomatic(p.participation || 'enabled', p.explicitRun),
+    thinking: p.thinking,
   };
 };
 
@@ -310,16 +314,26 @@ export async function startCollabRun(
         steerAgent: (id, text) => { runner.steer(id, text); return true; },
         steerAll: (text) => { runner.steerAll(text); },
       },
-      done: done.then((r: FanoutReport) => ({
+      done: done.then((r: FanoutReport) => {
+        const verdict = r.failed === 0 && r.completed > 0 ? 'APPROVE' : r.completed > 0 ? 'REQUEST_CHANGES' : 'UNKNOWN';
+        return {
         // normalized into the coordinator report shape the UI already renders
-        verdict: r.failed === 0 && r.completed > 0 ? 'APPROVE' : r.completed > 0 ? 'REQUEST_CHANGES' : 'UNKNOWN',
+        verdict,
         results: [],
         totalTurns: r.totalTurns,
-        rework: 0,
-        turns: r.totalTurns,
+        reworkPassesUsed: 0,
         conflicts: r.conflicts,
+        plan: '',
+        objectiveAcceptance: evaluateObjectiveAcceptance({
+          applicable: collaborationRequiresExecution(cfg.stages),
+          reviewerVerdict: verdict,
+          evidence: [],
+          runId: `fanout-${r.revisionAfter || 'none'}`,
+          revision: r.revisionAfter,
+        }),
         fanout: { completed: r.completed, failed: r.failed, cancelled: r.cancelled, tasks: r.results },
-      } as unknown as CoordinatorReport & { fanout: { completed: number; failed: number; cancelled: number; tasks: FanoutTaskResult[] } })),
+      } as CoordinatorReport & { fanout: { completed: number; failed: number; cancelled: number; tasks: FanoutTaskResult[] } };
+      }),
       contract: contract as TaskContract | null,
     };
   }

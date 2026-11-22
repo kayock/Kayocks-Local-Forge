@@ -24,13 +24,15 @@ import { toolsByNames } from './tools';
 import { rankCandidates, type AgentRole, type SchedulerCandidate, type SchedulerMachine } from './scheduler';
 import { plannerPrompt, coderPrompt, testerPrompt, reviewerPrompt, debuggerPrompt, type WorkspaceContext } from './prompts';
 import { genAssignmentId } from '@/lib/store/mesh';
+import { collaborationRequiresExecution, evaluateObjectiveAcceptance, type ObjectiveAcceptance, type TestEvidence } from './acceptance';
+import { paramsWithThinking, type ThinkingMode } from './thinking';
 
 export type StageId = 'planner' | 'coder' | 'tester' | 'reviewer' | 'debugger';
 
-const STAGE_TOOLS: Record<StageId, string[]> = {
+export const STAGE_TOOLS: Record<StageId, string[]> = {
   planner: ['memory_search', 'memory_write', 'notebook_search', 'notebook_append', 'finish'],
   coder: ['list_dir', 'read_file', 'write_file', 'append_file', 'edit_file', 'create_dir', 'search_project', 'run_command', 'launch_app', 'process_status', 'stop_process', 'install_dependencies', 'run_build', 'run_tests', 'memory_search', 'memory_write', 'notebook_append', 'notebook_search', 'read_scratchpad', 'write_scratchpad', 'finish'],
-  tester: ['list_dir', 'read_file', 'write_file', 'append_file', 'edit_file', 'search_project', 'run_command', 'launch_app', 'process_status', 'stop_process', 'install_dependencies', 'run_tests', 'run_build', 'memory_search', 'memory_write', 'notebook_append', 'notebook_search', 'finish'],
+  tester: ['list_dir', 'read_file', 'search_project', 'run_command', 'launch_app', 'process_status', 'stop_process', 'install_dependencies', 'run_tests', 'run_build', 'memory_search', 'notebook_search', 'finish'],
   reviewer: ['list_dir', 'read_file', 'search_project', 'memory_search', 'notebook_search', 'finish'],
   debugger: ['list_dir', 'read_file', 'edit_file', 'append_file', 'search_project', 'run_command', 'run_tests', 'run_build', 'process_status', 'stop_process', 'memory_search', 'memory_write', 'notebook_append', 'finish'],
 };
@@ -51,6 +53,9 @@ export interface AgentTarget {
   // false: eligible for an explicit stage assignment, not for automatic
   // ranking or failure fallback.
   allowAutomatic?: boolean;
+  // Omitted or 'auto' leaves the provider default. This does not change
+  // another participant's setting.
+  thinking?: ThinkingMode;
 }
 
 export interface CoordinatorConfig {
@@ -91,6 +96,7 @@ export interface CoordinatorReport {
   reworkPassesUsed: number;
   totalTurns: number;
   conflicts: string[];
+  objectiveAcceptance: ObjectiveAcceptance;
 }
 
 const ROLE_OF_STAGE: Record<StageId, AgentRole> = {
@@ -265,7 +271,7 @@ export class Coordinator {
       workspaceId: this.cfg.workspaceId,
       provider,
       model,
-      params: this.cfg.params,
+      params: paramsWithThinking(this.cfg.params, target.thinking),
       systemPrompt: stagePrompt(stage, this.cfg.workspaceContext),
       workspaceMeta: {
         id: this.cfg.workspaceId,
@@ -350,6 +356,24 @@ export class Coordinator {
       pending: r.paused ? ['paused by user — resumable'] : [],
     }).catch(() => {});
 
+    if (stage === 'tester') {
+      let revision: string | null = null;
+      try { revision = (await this.cfg.mesh.workspaceRevision(this.cfg.workspaceId)).revision; } catch { /* evidence stays unscoped when revision is unavailable */ }
+      for (const test of r.testsRun || []) {
+        this.testEvidence.push({
+          command: test.command,
+          exitCode: test.exitCode,
+          output: test.output || test.summary || '',
+          files: r.filesChanged,
+          at: test.at,
+          machine: test.machine || target.machineName,
+          runId: this.runId,
+          revision: test.revision || revision,
+          tool: test.tool,
+        });
+      }
+    }
+
     return { r, assignment, conflict };
   }
 
@@ -360,6 +384,8 @@ export class Coordinator {
   private active = new Map<string, AgentRunner>();
   private pendingSteeringByStage = new Map<string, string[]>();
   private stopRequested = false;
+  private runId = '';
+  private testEvidence: TestEvidence[] = [];
   lastRunResults: CoordinatorReport['results'] = [];
 
   /** Allow parallel coder agents (spec §6). Overlapping writes are detected via revisions. */
@@ -465,6 +491,8 @@ export class Coordinator {
   }
 
   async run(explicitTargets?: Partial<Record<StageId, AgentTarget>>): Promise<CoordinatorReport> {
+    this.runId = `collab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    this.testEvidence = [];
     const reworkLimit = this.cfg.reworkPasses ?? 1;
     let reworkUsed = 0;
     let totalTurns = 0;
@@ -561,11 +589,26 @@ export class Coordinator {
 
   private report(results: CoordinatorReport['results'], verdict: CoordinatorReport['verdict'], rework: number, turns: number, conflicts: string[], state?: string): CoordinatorReport {
     this.lastRunResults = results;
+    const revision = [...this.testEvidence].reverse().find((item) => item.runId === this.runId)?.revision ?? null;
+    const objectiveAcceptance = evaluateObjectiveAcceptance({
+      applicable: collaborationRequiresExecution(this.cfg.stages),
+      reviewerVerdict: verdict,
+      evidence: this.testEvidence,
+      runId: this.runId,
+      revision,
+    });
+    const verdictNotice = `Reviewer verdict: ${verdict}. Objective acceptance: ${objectiveAcceptance.status}. ${objectiveAcceptance.reason}`;
     if (state === 'paused') {
       this.cfg.onEvent({ type: 'paused', turn: turns, note: 'Coordinator paused — all agent assignments and scratchpads are persisted on the workspace host.' });
     } else {
-      this.cfg.onEvent({ type: 'notice', message: `Coordinator complete — verdict: ${verdict}, ${turns} turns across ${results.length} agent runs${conflicts.length ? `, ${conflicts.length} conflict(s) detected` : ''}.` });
+      this.cfg.onEvent({ type: 'notice', message: `Coordinator complete — ${verdictNotice}${conflicts.length ? `, ${conflicts.length} conflict(s) detected` : ''}.` });
     }
+    this.cfg.mesh.notebookAppend(this.cfg.workspaceId, {
+      agentId: 'coordinator',
+      kind: 'handoff',
+      content: `[objective ${objectiveAcceptance.status} run ${this.runId}] ${objectiveAcceptance.reason} Evidence: ${objectiveAcceptance.evidence.map((item) => `${item.command} exit ${item.exitCode} @ ${new Date(item.at).toISOString()} on ${item.machine}`).join('; ') || 'none'}`,
+      refs: this.runId,
+    }).catch(() => {});
     return {
       plan: results.find((r) => r.stage === 'planner')?.summary ?? '',
       results,
@@ -573,6 +616,7 @@ export class Coordinator {
       reworkPassesUsed: rework,
       totalTurns: turns,
       conflicts,
+      objectiveAcceptance,
     };
   }
 }

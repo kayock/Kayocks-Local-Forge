@@ -336,6 +336,7 @@ export function IdeView() {
     let assistantId: string | null = null;
     const wrappedOnEvent = (e: AgentEvent & { stage?: string }) => {
       if (e.type === 'turn_start') assistantId = null;
+      if (e.type === 'thinking') return;
       if (e.type === 'text_delta' && !assistantId) {
         assistantId = agent.addMessage({
           role: 'assistant',

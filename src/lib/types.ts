@@ -31,6 +31,9 @@ export interface InferenceParams {
   // NOT override the model server's own configured context/generation budget.
   maxTokensExplicit?: boolean;
   numCtxExplicit?: boolean;
+  // Per request, and only for a provider that understands it. 'auto' is not
+  // sent: the companion omits the field. Undefined preserves older settings.
+  think?: 'auto' | 'enabled' | 'disabled';
 }
 
 export const DEFAULT_INFERENCE: InferenceParams = {
@@ -87,7 +90,7 @@ export interface WireMessage {
 }
 
 export interface UnifiedStreamChunk {
-  t: 'text' | 'tool_call' | 'end' | 'error';
+  t: 'text' | 'thinking' | 'tool_call' | 'end' | 'error';
   v?: string;
   id?: string;
   name?: string;

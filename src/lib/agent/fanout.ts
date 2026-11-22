@@ -27,10 +27,10 @@ import { contractPromptBlock, bumpInPlace, type TaskContract } from './task-cont
 
 export type FanoutStage = 'coder' | 'tester' | 'reviewer' | 'debugger' | 'planner';
 
-const STAGE_TOOLS: Record<FanoutStage, string[]> = {
+export const STAGE_TOOLS: Record<FanoutStage, string[]> = {
   planner: ['finish'],
   coder: ['list_dir', 'read_file', 'write_file', 'append_file', 'edit_file', 'create_dir', 'search_project', 'run_command', 'launch_app', 'process_status', 'stop_process', 'install_dependencies', 'run_build', 'run_tests', 'finish'],
-  tester: ['list_dir', 'read_file', 'write_file', 'append_file', 'edit_file', 'search_project', 'run_command', 'launch_app', 'process_status', 'stop_process', 'install_dependencies', 'run_tests', 'run_build', 'finish'],
+  tester: ['list_dir', 'read_file', 'search_project', 'run_command', 'launch_app', 'process_status', 'stop_process', 'install_dependencies', 'run_tests', 'run_build', 'finish'],
   reviewer: ['list_dir', 'read_file', 'search_project', 'finish'],
   debugger: ['list_dir', 'read_file', 'edit_file', 'append_file', 'search_project', 'run_command', 'run_tests', 'run_build', 'process_status', 'stop_process', 'finish'],
 };
