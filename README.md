@@ -2,6 +2,9 @@
 
 # LocalForge IDE
 
+> **v0.5.0 release candidate** (`v0.5-dev`) — real PTY terminals (node-pty + packaged sidecar), mDNS LAN discovery, cross-machine fan-out orchestration (Control Center), durable SQLite project memory, outcome-aware recovery, Live Runs / Fleet Map / Memory / Diagnostics surfaces.
+> Build: `npm install && npm run build && npm start` · Tests: `bun test tests/` + `cd companion && npm test`
+
 **Your models. Your machine. Your IDE.**
 
 A browser-based AI coding environment that connects to language models already
