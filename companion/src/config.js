@@ -46,6 +46,7 @@ export const config = {
   workspace: args.workspace || null,
   showCode: !!args.showCode,
   statusFile: args.statusFile || null,
+  help: !!args.help,
 };
 
 // Windows installers put per-user app data in %LOCALAPPDATA%; keep the POSIX

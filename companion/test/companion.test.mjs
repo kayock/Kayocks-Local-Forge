@@ -11,6 +11,8 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import { resolveInWorkspace, statPath, extractArchive, FsError } from '../src/fsapi.js';
 import { screenCommand } from '../src/exec.js';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from '../src/config.js';
 
 function tmpDir() {
@@ -160,4 +162,21 @@ test('CLI option parsing supports Node.js scripts and Bun standalone executables
   // Bun variants can expose an additional compiled:// entry before real args.
   assert.equal(parseArgs(['bun', 'compiled://root/entry.js', 'localforge-companion.exe', '--help']).help, true);
   assert.deepEqual(parseArgs(['bun', 'compiled://root/entry.js', 'localforge-companion.exe', ...opts]), nodeArgs);
+});
+
+
+test('real Node Companion --help exits cleanly rather than starting the HTTP server', () => {
+  const home = tmpDir();
+  try {
+    const server = fileURLToPath(new URL('../src/server.js', import.meta.url));
+    const r = spawnSync(process.execPath, [server, '--help'], {
+      env: { ...process.env, LOCALFORGE_HOME: home },
+      encoding: 'utf8',
+      timeout: 8000,
+    });
+    assert.equal(r.error, undefined, String(r.error || ''));
+    assert.equal(r.status, 0, `${r.stderr} ${r.stdout}`);
+    assert.match(r.stdout, /Usage: localforge-companion/);
+    assert.doesNotMatch(r.stdout, /Listening on http/);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
