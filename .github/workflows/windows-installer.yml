@@ -101,6 +101,15 @@ jobs:
           test -f download/windows/LocalForgeCompanion/LocalForgeTray.exe || { echo "FAIL: tray exe missing"; exit 1; }
           python scripts/pe-set-gui-subsystem.py download/windows/LocalForgeCompanion/LocalForgeTray.exe
 
+      - name: Compile scoped Windows console interrupt helper (Ctrl+C for Bun ConPTY)
+        run: |
+          GCC=$(command -v gcc || ls /c/ProgramData/chocolatey/lib/mingw/tools/install/mingw64/bin/gcc.exe 2>/dev/null || ls /c/ProgramData/chocolatey/lib/mingw/tools/mingw64/bin/gcc.exe 2>/dev/null)
+          test -n "$GCC" || { echo "FAIL: mingw gcc not found for interrupt helper"; exit 1; }
+          "$GCC" -O2 -Wall -Wextra -municode \
+            -o download/windows/LocalForgeCompanion/LocalForgePtyInterrupt.exe \
+            installer/windows/pty-interrupt.c
+          test -f download/windows/LocalForgeCompanion/LocalForgePtyInterrupt.exe || { echo "FAIL: interrupt helper missing"; exit 1; }
+
       - name: Stage the WINDOWS-BUILT node-pty sidecar into the payload
         run: |
           mkdir -p download/windows/LocalForgeCompanion/pty-sidecar
@@ -122,7 +131,7 @@ jobs:
             echo "FAIL: NSIS did not produce the installer"; exit 1;
           }
           cd download/windows
-          sha256sum LocalForgeCompanion/localforge-companion.exe LocalForgeCompanion/LocalForgeTray.exe | tee payload-hashes.log
+          sha256sum LocalForgeCompanion/localforge-companion.exe LocalForgeCompanion/LocalForgeTray.exe LocalForgeCompanion/LocalForgePtyInterrupt.exe | tee payload-hashes.log
           sha256sum "LocalForge-Companion-Setup-$LF_VER.exe" > SHA256SUMS.txt
           cat SHA256SUMS.txt
           echo "NOTE: this installer is UNSIGNED (no code-signing certificate configured)"

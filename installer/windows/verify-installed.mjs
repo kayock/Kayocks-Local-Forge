@@ -114,6 +114,7 @@ ok('installer artifact present', !!setupExe, `no Setup exe in ${distDir}`);
 // ---- 1. installed files ------------------------------------------------
 ok('companion exe installed', fs.existsSync(path.join(APP_DIR, 'localforge-companion.exe')), APP_DIR);
 ok('tray exe installed at the correct path', fs.existsSync(path.join(APP_DIR, 'LocalForgeTray.exe')), APP_DIR);
+ok('Windows console interrupt helper installed', fs.existsSync(path.join(APP_DIR, 'LocalForgePtyInterrupt.exe')), APP_DIR);
 const ptyNodeCandidates = [
   path.join(APP_DIR, 'pty-sidecar', 'node-pty', 'prebuilds', 'win32-x64', 'conpty.node'),
   path.join(APP_DIR, 'pty-sidecar', 'node-pty', 'prebuilds', 'win32-x64', 'pty.node'),

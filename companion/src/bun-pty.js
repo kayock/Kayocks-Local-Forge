@@ -3,6 +3,8 @@
 // ConPTY on Windows; this avoids .node relative paths inside compiled bunfs.
 // This backend is only selected for a compiled Windows Bun executable.
 // Node.js and Linux paths continue using the original node-pty implementation.
+import fs from 'node:fs';
+import path from 'node:path';
 
 export function isStandaloneWindowsBunPty() {
   return process.platform === 'win32' &&
@@ -63,7 +65,34 @@ export function createBunPtyBackend() {
 
       return {
         get pid() { return child.pid; },
-        write(data) { terminal.write(String(data)); },
+        write(data) {
+          const bytes = String(data);
+          // Bun's Windows ConPTY can relay ETX as raw input without generating
+          // CTRL_C_EVENT for the foreground application. When a user presses
+          // Ctrl+C, dispatch the real Windows console-control event into this
+          // PTY's shell console via our tiny, separately packaged helper.
+          // This affects only this managed session, not the Companion itself.
+          if (bytes === '\x03') {
+            const helper = path.join(path.dirname(process.execPath), 'LocalForgePtyInterrupt.exe');
+            if (fs.existsSync(helper)) {
+              try {
+                const interrupt = Bun.spawn([helper, String(child.pid)], {
+                  stdin: 'ignore', stdout: 'ignore', stderr: 'ignore', windowsHide: true,
+                });
+                void Promise.resolve(interrupt.exited).then((code) => {
+                  if (code !== 0) {
+                    console.warn('LocalForge PTY: native Ctrl+C helper failed (' + code + '); falling back to ETX');
+                    try { terminal.write(bytes); } catch {}
+                  }
+                }, () => { try { terminal.write(bytes); } catch {} });
+                return;
+              } catch (e) {
+                console.warn('LocalForge PTY: native Ctrl+C helper could not start:', String(e?.message || e));
+              }
+            }
+          }
+          terminal.write(bytes);
+        },
         resize(cols, rows) { terminal.resize(cols, rows); },
         onData(fn) {
           onData.add(fn);

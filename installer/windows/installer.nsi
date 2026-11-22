@@ -60,6 +60,7 @@ Section "LocalForge Companion (required)" SEC_CORE
   SetOutPath "$INSTDIR\LocalForgeCompanion"
   File "..\..\download\windows\LocalForgeCompanion\localforge-companion.exe"
   File "..\..\download\windows\LocalForgeCompanion\LocalForgeTray.exe"
+  File "..\..\download\windows\LocalForgeCompanion\LocalForgePtyInterrupt.exe"
 
   ; Real PTY backend: prebuilt node-pty sidecar loaded at runtime from
   ; <exe-dir>/pty-sidecar/node-pty (companion/src/pty.js resolves it relative
@@ -123,6 +124,7 @@ Section "Uninstall"
   ExecWait 'taskkill.exe /IM LocalForgeTray.exe /T /F'
   Delete "$INSTDIR\LocalForgeCompanion\localforge-companion.exe"
   Delete "$INSTDIR\LocalForgeCompanion\LocalForgeTray.exe"
+  Delete "$INSTDIR\LocalForgeCompanion\LocalForgePtyInterrupt.exe"
   RMDir /r "$INSTDIR\LocalForgeCompanion\pty-sidecar"
   RMDir "$INSTDIR\LocalForgeCompanion"
   Delete "$INSTDIR\Uninstall.exe"
