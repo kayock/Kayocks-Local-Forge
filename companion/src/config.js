@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 
-export const VERSION = '0.4.4';
+export const VERSION = '0.4.5';
 
 function parseArgs(argv) {
   const out = {};

@@ -29,6 +29,14 @@ export class MeshClient {
 
   private url(path: string, query?: Record<string, string>): string {
     const c = this.getCfg();
+    if (c.mode === 'gateway') {
+      if (c.gatewayPath) {
+        const qs = query ? '?' + new URLSearchParams(query).toString() : '';
+        return `${c.gatewayPath}${path}${qs}`;
+      }
+      const qs = new URLSearchParams({ XTransformPort: String(c.gatewayPort), ...(query || {}) });
+      return `${path}?${qs}`;
+    }
     const base = (c.mode === 'remote' ? (c.remoteUrl || c.directUrl) : c.directUrl).replace(/\/+$/, '');
     const qs = query ? '?' + new URLSearchParams(query).toString() : '';
     return `${base}${path}${qs}`;

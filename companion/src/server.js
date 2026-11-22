@@ -37,9 +37,11 @@ import {
   probeEndpoint, resolveLemonadeCredentials,
 } from './providers.js';
 import { mintPreviewToken, handlePreview, handleDevProxy } from './preview.js';
+import { routeControl, mesh, model } from './controlplane.js';
 
 await ensureHome();
 const state = loadState();
+mesh.applySavedNetwork();
 
 const sessions = makeSessionRegistry(); // running streaming terminal sessions
 const sseClients = new Set();           // event stream subscribers
@@ -142,6 +144,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 async function routeApi(req, res, url, p) {
+  if (await routeControl(req, res, url, p)) return;
   const method = req.method;
 
   // ---- workspaces ----
@@ -628,6 +631,7 @@ function shutdown() {
   // (visible windows belong to the user and stay open, same policy as
   // detached processes).
   closeHeadlessSessions().catch(() => {});
+  model.stopManagedModels();
   try { writeStatus({ stopping: true, stoppedAt: new Date().toISOString() }); } catch { /* ignore */ }
   server.close();
   process.exit(0);

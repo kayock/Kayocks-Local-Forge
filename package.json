@@ -13,7 +13,7 @@
     "db:reset": "prisma migrate reset",
     "test:e2e": "bun e2e/live-e2e.ts",
     "test:protocol": "bun test tests/protocol.test.ts",
-    "test:companion": "cd companion && node --test test/companion.test.mjs test/server.integration.test.mjs",
+    "test:companion": "cd companion && npm test",
     "test": "bun test tests/protocol.test.ts && cd companion && npm test",
     "build:windows": "bash installer/build-windows.sh"
   },

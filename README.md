@@ -23,6 +23,19 @@ backend only manages accounts and metadata — source code and model prompts nev
 leave the customer's machine unless the user explicitly enables a transfer
 feature (none is enabled in this build).
 
+
+## Companion control plane (v0.4.5 source candidate)
+
+The `companion/` source now implements the Phase 2 hardware, Model Manager,
+explicitly paired LAN mesh peers, agent scratchpad/notebook/assignments and
+workspace-revision routes used by `MeshClient`. Nothing loads a model during
+inventory. Existing provider/chat and pairing contracts remain supported.
+See [Phase 2 implementation and limits](docs/CONTROL_PLANE_PHASE2_2026-11-21.md).
+
+**Source-only:** the supplied Windows/Linux installers were not rebuilt from
+this code. Physical fleet tests, Next.js build verification, native discovery
+and automated agent scheduling remain separate work.
+
 ## Quick start (5 minutes)
 
 ### 1. Run the IDE

@@ -16,7 +16,7 @@ zip -q -r "$OUT" \
   src public/robots.txt public/logo.svg prisma/schema.prisma \
   companion/src companion/test companion/package.json companion/package-lock.json \
   companion/README.md companion/.env.example \
-  docs e2e tests scripts installer .zscripts \
+  docs e2e tests scripts installer .zscripts .github/workflows \
   README.md Caddyfile components.json eslint.config.mjs next-env.d.ts \
   next.config.ts postcss.config.mjs tsconfig.json .gitignore .env.example \
   package.json bun.lock package-lock.json

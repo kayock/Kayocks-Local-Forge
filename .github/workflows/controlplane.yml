@@ -1,0 +1,37 @@
+name: LocalForge Companion control plane
+on:
+  push:
+    paths:
+      - 'companion/**'
+      - '.github/workflows/controlplane.yml'
+  pull_request:
+    paths:
+      - 'companion/**'
+      - '.github/workflows/controlplane.yml'
+jobs:
+  companion-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: companion/package-lock.json
+      - run: npm ci
+        working-directory: companion
+      - run: npm test
+        working-directory: companion
+  controlplane-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: companion/package-lock.json
+      - run: npm ci
+        working-directory: companion
+      - run: node --test test/controlplane.integration.test.mjs
+        working-directory: companion
