@@ -210,6 +210,20 @@ export class MeshClient {
     return this.req('GET', this.peerPath(peerId, `/api/ws/${workspaceId}/revision`));
   }
 
+  // ---- RC3: task checkpoints (shadow git on the workspace host) ----
+  async createCheckpoint(workspaceId: string, label: string, peerId?: string | null): Promise<{ available: boolean; checkpoint?: { id: string; hash: string; label: string; at: number }; error?: string }> {
+    return this.req('POST', this.peerPath(peerId, `/api/ws/${workspaceId}/checkpoints`), { label });
+  }
+  async listCheckpoints(workspaceId: string, peerId?: string | null): Promise<{ available: boolean; checkpoints: { id: string; hash: string; label: string; at: number }[] }> {
+    return this.req('GET', this.peerPath(peerId, `/api/ws/${workspaceId}/checkpoints`));
+  }
+  async checkpointDiff(workspaceId: string, hash: string, peerId?: string | null): Promise<{ available: boolean; files?: string[]; stat?: string; error?: string }> {
+    return this.req('GET', this.peerPath(peerId, `/api/ws/${workspaceId}/checkpoints/${encodeURIComponent(hash)}/diff`));
+  }
+  async restoreCheckpoint(workspaceId: string, hash: string, peerId?: string | null): Promise<{ available: boolean; restored?: string; removedFiles?: string[]; safetyCheckpoint?: any; error?: string }> {
+    return this.req('POST', this.peerPath(peerId, `/api/ws/${workspaceId}/checkpoints/${encodeURIComponent(hash)}/restore`), {});
+  }
+
   // ---- Milestone 2: mDNS discovery (never pairs; explicit user action) ----
   async discover(): Promise<{
     available: boolean; enabled?: boolean; reason?: string; serviceType?: string;

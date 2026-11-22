@@ -1,6 +1,7 @@
 // Companion control-plane HTTP contract consumed by src/lib/mesh/client.ts.
 import { sendJson, readBody } from './http-utils.js';
 import { findWorkspace } from './config.js';
+import * as checkpoints from './checkpoints.js';
 import { hardwareInventory } from './platform.js';
 import * as model from './modelmgr.js';
 import * as mesh from './mesh.js';
@@ -82,6 +83,21 @@ export async function routeControl(req, res, url, p) {
   if ((m = match(p, /^\/api\/ws\/([^/]+)\/revision$/)) && method === 'GET') {
     const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
     respond(res, await memory.workspaceRevision(ws)); return true;
+  }
+
+  // ---- RC3: task checkpoints (shadow git) ----
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/checkpoints$/))) {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    if (method === 'GET') { respond(res, checkpoints.listCheckpoints(ws)); return true; }
+    if (method === 'POST') { respond(res, checkpoints.createCheckpoint(ws, (await readBody(req, 8 * 1024))?.label)); return true; }
+  }
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/checkpoints\/([\w.:-]+)\/diff$/))) {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    respond(res, checkpoints.checkpointDiff(ws, dec(m[2]))); return true;
+  }
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/checkpoints\/([\w.:-]+)\/restore$/))) {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    respond(res, checkpoints.restoreCheckpoint(ws, dec(m[2]))); return true;
   }
 
   // ---- Milestone 2: cross-machine task packets ----

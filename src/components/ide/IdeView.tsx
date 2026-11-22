@@ -50,6 +50,7 @@ import { CORE_TOOLS } from '@/lib/agent/tools';
 import { createContract, contractPromptBlock, buildHandoffPacket, markSteeringApplied, recordProgress, setStatus as setContractStatus, waiveRequirement } from '@/lib/agent/task-contract';
 import type { AgentEvent, AgentMessage, ToolProtocolMode, CompletionResult } from '@/lib/agent/types';
 import { resolveInferenceParams } from '@/lib/types';
+import { useTaskSessions } from '@/lib/store/task-sessions';
 import type { TaskContract } from '@/lib/agent/task-contract';
 import { toast } from '@/hooks/use-toast';
 
@@ -74,6 +75,8 @@ export function IdeView() {
   const [workspaceRoot, setWorkspaceRoot] = useState<string>('');
   const abortRef = useRef<AbortController | null>(null);
   const runnerRef = useRef<AgentRunner | PipelineRunner | null>(null);
+  const sessionRef = useRef<string | null>(null);
+  const resumeSessionRef = useRef<string | null>(null);
   const toolMsgMap = useRef<Map<string, string>>(new Map()); // toolLogId -> chat msg id
   const runOpMap = useRef<Map<string, string>>(new Map());   // toolLogId -> run op id
   // message history of the last turn-limited run, for "Continue task"
@@ -263,8 +266,22 @@ export function IdeView() {
     return null;
   }, [settings.autoEscalate, settings.providers, settings.activeProviderId]);
 
-  const runAgent = useCallback(async (task: string, opts?: { resumeMessages?: AgentMessage[]; resumeModel?: string | null }) => {
+  const runAgent = useCallback(async (task: string, optsIn?: { resumeMessages?: AgentMessage[]; resumeModel?: string | null; resumeSessionId?: string }) => {
+    let opts: { resumeMessages?: AgentMessage[]; resumeModel?: string | null; resumeSessionId?: string } = optsIn ?? {};
     if (!ws.workspaceId) return;
+    // Durable session resume: seed the recorded history as context.
+    if (opts?.resumeSessionId) {
+      resumeSessionRef.current = opts.resumeSessionId;
+      const prior = useTaskSessions.getState().sessions.find((x) => x.id === opts.resumeSessionId);
+      if (prior?.messages.length && !opts.resumeMessages) {
+        opts = {
+          ...opts,
+          resumeMessages: prior.messages.slice(-10).map((m) => ({ role: m.role as any, content: m.content })) as AgentMessage[],
+        };
+      }
+    } else {
+      resumeSessionRef.current = null;
+    }
     if (!settings.providers.find((p) => p.id === settings.activeProviderId) || !settings.model) {
       toast({ title: 'No model selected', description: 'Open Settings → Discover providers, then pick a model.', variant: 'destructive' });
       return;
@@ -469,6 +486,16 @@ export function IdeView() {
         if (assistantId) agent.finalizeMessage(assistantId);
         if (e.content) agent.addMessage({ role: 'assistant', content: e.content, stage: (e as any).stage });
         if (e.note) agent.addMessage({ role: 'system', content: `ℹ ${e.note}` });
+        // durable session: record the outcome honestly (paused/done/failed)
+        if (sessionRef.current) {
+          const ss = useTaskSessions.getState();
+          const sid = sessionRef.current;
+          ss.appendMessage(sid, 'assistant', String(e.content || e.note || '').slice(0, 2000));
+          const note = String(e.note || '');
+          const status = /Paused|paused/.test(note) ? 'paused' : /STALLED|stopped/i.test(note) ? 'failed' : (e.content ? 'done' : 'paused');
+          const contractSnap = contractRef.current ? { status: contractRef.current.status, statusNote: contractRef.current.statusNote, requirements: (contractRef.current.requirements ?? []).map((r: any) => ({ text: r.text, met: !!r.met })) } : null;
+          ss.updateSession(sid, { status, contract: contractSnap });
+        }
         // Problem D: the coordinator verdict, not the model's claim
         const completion = (e as any).completion as CompletionResult | undefined;
         if (completion) {
@@ -498,6 +525,25 @@ export function IdeView() {
       const basePrompt = agentSystemPrompt(wsCtx, agentMode === 'chat' ? 'chat' : 'task', settings.agentDevMode);
       const systemPrompt = contract ? `${contractPromptBlock(contract, { role: agentMode === 'pipeline' ? 'pipeline stage' : 'task agent' })}\n\n=== RUNTIME ===\n${basePrompt}` : basePrompt;
       if (contract) persistContract(contract);
+
+      // Durable task session (RC3): every run is recorded and resumable.
+      const sessions = useTaskSessions.getState();
+      let session = sessions.createSession(ws.workspaceId, task);
+      if (resumeSessionRef.current) {
+        sessions.updateSession(resumeSessionRef.current, { status: 'active' });
+        const existing = sessions.sessions.find((x) => x.id === resumeSessionRef.current);
+        if (existing) session = existing;
+      }
+      if (session) {
+        sessionRef.current = session.id;
+        sessions.updateSession(session.id, { contract: contract ? { status: contract.status, statusNote: contract.statusNote, requirements: contract.requirements.map((r) => ({ text: r.text, met: (r as any).status ? (r as any).status === 'met' : false })) } : null, modelsUsed: [...new Set([...session.modelsUsed, settings.model])] });
+        sessions.appendMessage(session.id, 'user', task);
+      }
+      // Safety checkpoint before the first mutating run (shadow git, honest no-op when git is missing)
+      try {
+        const cp = await client.createCheckpoint(ws.workspaceId, `before: ${task.slice(0, 60)}`);
+        if (cp?.available && cp.checkpoint && session) useTaskSessions.getState().addCheckpoint(session.id, cp.checkpoint);
+      } catch { /* checkpoints unavailable — workspace files untouched */ }
 
       if (agentMode === 'pipeline') {
         const pipeline = new PipelineRunner({

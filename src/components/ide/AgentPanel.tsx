@@ -18,6 +18,7 @@ import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useAgent, type ChatMessageView } from '@/lib/store/agent';
 import { useSettings } from '@/lib/store/settings';
+import { useTaskSessions } from '@/lib/store/task-sessions';
 import { CheckCircle2, ChevronDown, ChevronRight, GitCompare, Loader2, Play, Send, ShieldCheck, Square, XCircle, Wrench, User, Bot, Workflow, Flag } from 'lucide-react';
 
 function DiffView({ diff, path }: { diff: string; path?: string }) {
@@ -131,7 +132,7 @@ export function AgentPanel({
   mode,
   setMode,
 }: {
-  onRun: (task: string) => void;
+  onRun: (task: string, opts?: { resumeSessionId?: string }) => void;
   onContinue?: () => void;
   onStop: () => void;
   onSteer?: (text: string) => boolean;
@@ -143,6 +144,11 @@ export function AgentPanel({
   const { messages, pendingApproval, running, currentStage, toolLog, lastSession, contract, lastCompletion } = useAgent();
   const settings = useSettings(); // includes agentDevMode + setAgentDevMode (persisted)
   const [input, setInput] = useState('');
+  const [taskQuery, setTaskQuery] = useState('');
+  const [showHistory, setShowHistory] = useState(false);
+  const sessions = useTaskSessions((st) => st.sessions);
+  const searchSessions = useTaskSessions((st) => st.searchSessions);
+  const history = searchSessions(null, taskQuery).slice(0, 8);
   const [showContract, setShowContract] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const activeProvider = settings.providers.find((p) => p.id === settings.activeProviderId);
@@ -198,6 +204,39 @@ export function AgentPanel({
           <span className="font-mono truncate">{modelReady ? `${activeProvider!.label || activeProvider!.baseUrl} · ${settings.model}` : 'No model selected'}</span>
           {mode === 'pipeline' && currentStage && (
             <Badge variant="outline" className="text-[10px] lf-pulse-dot">{currentStage} running</Badge>
+          )}
+        </div>
+        {/* RC3: durable task history — searchable, resumable */}
+        <div className="px-1">
+          <button className="w-full flex items-center justify-between text-[10px] text-muted-foreground hover:text-foreground" onClick={() => setShowHistory((v) => !v)}>
+            <span>Task history ({sessions.length})</span>
+            <span>{showHistory ? '▾' : '▸'}</span>
+          </button>
+          {showHistory && (
+            <div className="mt-1 space-y-1">
+              <input
+                value={taskQuery}
+                onChange={(e) => setTaskQuery(e.target.value)}
+                placeholder="Search tasks…"
+                className="w-full h-6 text-[11px] rounded border bg-muted/40 px-2"
+              />
+              {history.map((t) => (
+                <div key={t.id} className="flex items-center gap-1.5 text-[11px] rounded border bg-muted/20 px-2 py-1">
+                  <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${t.status === 'done' ? 'bg-emerald-500' : t.status === 'paused' ? 'bg-amber-500' : t.status === 'failed' ? 'bg-red-500' : 'bg-blue-500'}`} />
+                  <span className="flex-1 truncate" title={t.objective}>{t.objective}</span>
+                  {t.status !== 'active' && (
+                    <button
+                      className="text-[10px] px-1.5 py-0.5 rounded border hover:border-primary/60 shrink-0"
+                      title={`Resume “${t.objective.slice(0, 60)}” from its recorded context (${t.messages.length} messages, ${t.checkpoints.length} checkpoints)`}
+                      onClick={() => { setShowHistory(false); onRun(t.objective, { resumeSessionId: t.id }); }}
+                    >
+                      Resume
+                    </button>
+                  )}
+                </div>
+              ))}
+              {!history.length && <div className="text-[10px] text-muted-foreground px-2">No recorded tasks yet.</div>}
+            </div>
           )}
         </div>
         {/* Forge (Problem C): contract strip */}

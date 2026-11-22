@@ -120,6 +120,20 @@ export class CompanionClient {
     return json as T;
   }
 
+  // ---- RC3: task checkpoints (shadow git on this companion's workspace) ----
+  async createCheckpoint(workspaceId: string, label: string): Promise<{ available: boolean; checkpoint?: { id: string; hash: string; label: string; at: number }; error?: string }> {
+    return this.req('POST', `/api/ws/${workspaceId}/checkpoints`, { label });
+  }
+  async listCheckpoints(workspaceId: string): Promise<{ available: boolean; checkpoints: { id: string; hash: string; label: string; at: number }[] }> {
+    return this.req('GET', `/api/ws/${workspaceId}/checkpoints`);
+  }
+  async checkpointDiff(workspaceId: string, hash: string): Promise<{ available: boolean; files?: string[]; stat?: string; error?: string }> {
+    return this.req('GET', `/api/ws/${workspaceId}/checkpoints/${encodeURIComponent(hash)}/diff`);
+  }
+  async restoreCheckpoint(workspaceId: string, hash: string): Promise<{ available: boolean; restored?: string; removedFiles?: string[]; safetyCheckpoint?: any; error?: string }> {
+    return this.req('POST', `/api/ws/${workspaceId}/checkpoints/${encodeURIComponent(hash)}/restore`, {});
+  }
+
   // ---- pairing / status ----
   async health(): Promise<{
     ok: boolean; name: string; version: string; platform: string; paired: boolean;
