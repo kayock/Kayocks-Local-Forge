@@ -723,6 +723,146 @@ export const CORE_TOOLS: ToolDef[] = [
       return { output: r.note ?? 'Browser session closed.' };
     },
   },
+  // ---- Milestone 3: durable project memory tools ----
+  {
+    name: 'memory_search',
+    description: 'Search the workspace\'s durable project memory (decisions, conventions, known bugs, outcomes, preferences) plus the indexed source files. Use at task start to recall prior project knowledge, and before redoing work.',
+    danger: 'safe',
+    params: [
+      { name: 'query', type: 'string', description: 'Keyword search query', required: true, aliases: ['q'] },
+      { name: 'kind', type: 'string', description: 'Optional filter: decision | convention | bug | fact | outcome | test-history | preference | note' },
+      { name: 'limit', type: 'number', description: 'Max results (default 8)' },
+    ],
+    async run(args, ctx) {
+      if (!ctx.memory) return { output: 'Error: project memory is not available in this context (older companion or mock host).', isError: true };
+      const q = String(args.query ?? args.q ?? '');
+      if (!q) return { output: 'Error: memory_search needs a query.', isError: true };
+      const r = await ctx.memory.search(q, { kind: args.kind ? String(args.kind) : undefined, limit: Number(args.limit) || 8 });
+      if (!r.results.length) return { output: `No project memories match "${q}". You can record new knowledge with memory_write.` };
+      const lines = r.results.map((m) => `[${m.kind}]#${m.id.slice(0, 8)} (${m.score != null ? `score ${m.score}, ` : ''}updated ${new Date(m.updatedAt).toISOString().slice(0, 10)})${m.tags?.length ? ` tags:${m.tags.join(',')}` : ''}\n  ${m.content.slice(0, 400)}`);
+      return { output: cap(`${r.results.length} memory hit(s)${r.hybrid ? ' (hybrid keyword+embedding)' : ''}:\n${lines.join('\n')}`, 16000) };
+    },
+  },
+  {
+    name: 'memory_read',
+    description: 'Read one full project memory record by its id (as returned by memory_search).',
+    danger: 'safe',
+    params: [{ name: 'id', type: 'string', description: 'Memory record id (full id or the 8-char prefix shown by memory_search)', required: true }],
+    async run(args, ctx) {
+      if (!ctx.memory) return { output: 'Error: project memory is not available in this context.', isError: true };
+      const wanted = String(args.id ?? '');
+      try {
+        const m = await ctx.memory.read(wanted);
+        return { output: `[${m.kind}] ${m.content}${m.refs ? `\nrefs: ${m.refs}` : ''}` };
+      } catch (e: any) {
+        // allow the 8-char prefix form: resolve via a fresh search
+        if (wanted.length === 8) {
+          const r = await ctx.memory.search(wanted, { limit: 20 }).catch(() => null);
+          const hit = r?.results.find((x) => x.id.startsWith(wanted));
+          if (hit) return { output: `[${hit.kind}] ${hit.content}` };
+        }
+        return { output: `Error reading memory ${wanted}: ${summarizeError(e)}`, isError: true };
+      }
+    },
+  },
+  {
+    name: 'memory_write',
+    description: 'Record durable project knowledge for future agents: architecture/design decisions, coding conventions, discovered bugs and fixes, important facts, task outcomes, verified test history. Duplicate content is merged automatically — write freely.',
+    danger: 'safe',
+    params: [
+      { name: 'kind', type: 'string', description: 'decision | convention | bug | fact | outcome | test-history | preference | note', required: true },
+      { name: 'content', type: 'string', description: 'The knowledge to persist — concrete and self-contained (a future agent reads it without this conversation)', required: true },
+      { name: 'tags', type: 'string', description: 'Comma-separated short tags, e.g. "storage,architecture"' },
+      { name: 'refs', type: 'string', description: 'Related file paths or ids' },
+    ],
+    async run(args, ctx) {
+      if (!ctx.memory) return { output: 'Error: project memory is not available in this context.', isError: true };
+      const kind = String(args.kind ?? 'note');
+      const content = String(args.content ?? '');
+      if (!content.trim()) return { output: 'Error: memory_write needs non-empty content.', isError: true };
+      const tags = typeof args.tags === 'string' && args.tags.trim() ? args.tags.split(',').map((t: string) => t.trim()).filter(Boolean) : undefined;
+      const r = await ctx.memory.write(kind, content, { tags, refs: args.refs ? String(args.refs) : undefined });
+      return { output: r.deduplicated
+        ? `Memory already known — existing record merged/updated (id ${r.id}).`
+        : `Memory recorded (id ${r.id}). Future agents will find it via memory_search.` };
+    },
+  },
+  {
+    name: 'notebook_append',
+    description: 'Append an entry to the shared agent notebook (append-only; visible to all agents on this workspace): kind = finding | handoff | decision | issue.',
+    danger: 'safe',
+    params: [
+      { name: 'kind', type: 'string', description: 'finding | handoff | decision | issue', required: true },
+      { name: 'content', type: 'string', description: 'The entry text', required: true },
+      { name: 'refs', type: 'string', description: 'Optional related file paths or assignment ids' },
+    ],
+    async run(args, ctx) {
+      if (!ctx.memory) return { output: 'Error: notebook is not available in this context.', isError: true };
+      const agentId = ctx.workspaceMeta?.machineLabel ? `agent@${ctx.workspaceMeta.machineLabel}` : 'agent';
+      const r = await ctx.memory.notebookAppend(String(args.kind ?? 'finding'), String(args.content ?? ''), { refs: args.refs ? String(args.refs) : undefined });
+      return { output: `Notebook entry appended (seq ${r.seq ?? '?'}).` };
+    },
+  },
+  {
+    name: 'notebook_search',
+    description: 'Search the shared agent notebook (findings, handoffs, decisions, issues from other agents).',
+    danger: 'safe',
+    params: [
+      { name: 'query', type: 'string', description: 'Keyword filter', required: true, aliases: ['q'] },
+      { name: 'kind', type: 'string', description: 'Optional kind filter' },
+      { name: 'limit', type: 'number', description: 'Max entries (default 20)' },
+    ],
+    async run(args, ctx) {
+      if (!ctx.memory) return { output: 'Error: notebook is not available in this context.', isError: true };
+      const r = await ctx.memory.notebookSearch(String(args.query ?? args.q ?? ''), { kind: args.kind ? String(args.kind) : undefined, limit: Number(args.limit) || 20 });
+      if (!r.results.length) return { output: 'No notebook entries match.' };
+      const lines = r.results.map((e) => `#${e.seq ?? '?'} [${e.kind}] ${e.agentId}: ${e.content.slice(0, 240)}${e.refs ? ` (refs: ${e.refs})` : ''}`);
+      return { output: cap(lines.join('\n'), 16000) };
+    },
+  },
+  {
+    name: 'read_scratchpad',
+    description: 'Read an agent scratchpad (private working state: objective, plan, findings, errors, pending) by agent id. Use your own agentId from the task assignment, or read another agent\'s to coordinate.',
+    danger: 'safe',
+    params: [{ name: 'agentId', type: 'string', description: 'Agent id whose scratchpad to read', required: true }],
+    async run(args, ctx) {
+      if (!ctx.memory) return { output: 'Error: scratchpad is not available in this context.', isError: true };
+      const s = await ctx.memory.readScratchpad(String(args.agentId ?? ''));
+      const parts: string[] = [];
+      if (s.objective) parts.push(`objective: ${String(s.objective).slice(0, 300)}`);
+      if (s.progress) parts.push(`progress: ${String(s.progress).slice(0, 200)}`);
+      for (const key of ['plan', 'findings', 'toolResults', 'errors', 'pending']) {
+        if (Array.isArray(s[key]) && s[key].length) parts.push(`${key}: ${s[key].slice(0, 8).map((x: unknown) => String(x).slice(0, 160)).join(' | ')}`);
+      }
+      return { output: parts.length ? parts.join('\n') : '(empty scratchpad)' };
+    },
+  },
+  {
+    name: 'write_scratchpad',
+    description: 'Update your scratchpad (private working state persisted across turns): objective, progress, plan, findings, toolResults, errors, pending. Merge-safe: only provided fields change.',
+    danger: 'safe',
+    params: [
+      { name: 'agentId', type: 'string', description: 'Your agent id', required: true },
+      { name: 'objective', type: 'string', description: 'What this agent is trying to do' },
+      { name: 'progress', type: 'string', description: 'Short current status' },
+      { name: 'plan', type: 'string', description: 'JSON array of plan steps' },
+      { name: 'findings', type: 'string', description: 'JSON array of discovered facts' },
+      { name: 'errors', type: 'string', description: 'JSON array of errors seen (with context)' },
+      { name: 'pending', type: 'string', description: 'JSON array of remaining steps' },
+    ],
+    async run(args, ctx) {
+      if (!ctx.memory) return { output: 'Error: scratchpad is not available in this context.', isError: true };
+      const patch: Record<string, unknown> = {};
+      for (const k of ['objective', 'progress']) if (args[k] !== undefined) patch[k] = String(args[k]);
+      for (const k of ['plan', 'findings', 'toolResults', 'errors', 'pending']) {
+        if (args[k] !== undefined) {
+          try { patch[k] = JSON.parse(String(args[k])); } catch { patch[k] = [String(args[k])]; }
+        }
+      }
+      const s = await ctx.memory.writeScratchpad(String(args.agentId ?? 'agent'), patch);
+      return { output: `Scratchpad updated (progress: ${String((s as any)?.progress ?? 'n/a').slice(0, 80)}).` };
+    },
+  },
   {
     name: 'finish',
     description: 'Declare the task complete with a summary. Call this when everything requested has been done and verified.',

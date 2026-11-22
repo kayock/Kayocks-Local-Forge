@@ -28,11 +28,11 @@ import { genAssignmentId } from '@/lib/store/mesh';
 export type StageId = 'planner' | 'coder' | 'tester' | 'reviewer' | 'debugger';
 
 const STAGE_TOOLS: Record<StageId, string[]> = {
-  planner: ['finish'],
-  coder: ['list_dir', 'read_file', 'write_file', 'append_file', 'edit_file', 'create_dir', 'search_project', 'run_command', 'launch_app', 'process_status', 'stop_process', 'install_dependencies', 'run_build', 'run_tests', 'finish'],
-  tester: ['list_dir', 'read_file', 'write_file', 'append_file', 'edit_file', 'search_project', 'run_command', 'launch_app', 'process_status', 'stop_process', 'install_dependencies', 'run_tests', 'run_build', 'finish'],
-  reviewer: ['list_dir', 'read_file', 'search_project', 'finish'],
-  debugger: ['list_dir', 'read_file', 'edit_file', 'append_file', 'search_project', 'run_command', 'run_tests', 'run_build', 'process_status', 'stop_process', 'finish'],
+  planner: ['memory_search', 'memory_write', 'notebook_search', 'notebook_append', 'finish'],
+  coder: ['list_dir', 'read_file', 'write_file', 'append_file', 'edit_file', 'create_dir', 'search_project', 'run_command', 'launch_app', 'process_status', 'stop_process', 'install_dependencies', 'run_build', 'run_tests', 'memory_search', 'memory_write', 'notebook_append', 'notebook_search', 'read_scratchpad', 'write_scratchpad', 'finish'],
+  tester: ['list_dir', 'read_file', 'write_file', 'append_file', 'edit_file', 'search_project', 'run_command', 'launch_app', 'process_status', 'stop_process', 'install_dependencies', 'run_tests', 'run_build', 'memory_search', 'memory_write', 'notebook_append', 'notebook_search', 'finish'],
+  reviewer: ['list_dir', 'read_file', 'search_project', 'memory_search', 'notebook_search', 'finish'],
+  debugger: ['list_dir', 'read_file', 'edit_file', 'append_file', 'search_project', 'run_command', 'run_tests', 'run_build', 'process_status', 'stop_process', 'memory_search', 'memory_write', 'notebook_append', 'finish'],
 };
 
 export interface AgentTarget {

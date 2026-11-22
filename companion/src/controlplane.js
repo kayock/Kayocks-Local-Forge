@@ -7,6 +7,7 @@ import * as mesh from './mesh.js';
 import * as memory from './agentmem.js';
 import * as tasks from './tasks.js';
 import * as coordination from './coordination.js';
+import * as memoryStore from './memory.js';
 import { discoveryStatus } from './discovery.js';
 import { loadModel as legacyLoad, unloadModel as legacyUnload } from './providers.js';
 
@@ -104,6 +105,52 @@ export async function routeControl(req, res, url, p) {
   if ((m = match(p, /^\/api\/ws\/([^/]+)\/tasks\/([^/]+)$/)) && method === 'GET') {
     const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
     respond(res, tasks.getTask(ws.id, dec(m[2]))); return true;
+  }
+
+  // ---- Milestone 3: persistent project memory ----
+  if (p === '/api/memory/capabilities' && method === 'GET') { respond(res, memoryStore.memoryCapabilities()); return true; }
+  if (p === '/api/memory/embeddings' && method === 'POST') {
+    const b = await readBody(req, 8 * 1024);
+    respond(res, b && b.endpoint === null ? memoryStore.configureEmbeddings(null) : memoryStore.configureEmbeddings(b));
+    return true;
+  }
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/memory$/))) {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    if (method === 'GET') { respond(res, memoryStore.listMemories(ws.id, url.searchParams)); return true; }
+    if (method === 'POST') { respond(res, memoryStore.writeMemory(ws.id, await readBody(req, 64 * 1024))); return true; }
+  }
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/memory\/search$/)) && method === 'GET') {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    respond(res, await memoryStore.searchMemory(ws.id, url.searchParams)); return true;
+  }
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/memory\/files$/)) && method === 'GET') {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    respond(res, await memoryStore.searchFiles(ws.id, url.searchParams)); return true;
+  }
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/memory\/index$/)) && method === 'POST') {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    const b = await readBody(req, 8 * 1024).catch(() => ({}));
+    respond(res, await memoryStore.indexWorkspace(ws, { full: b?.full === true })); return true;
+  }
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/memory\/stats$/)) && method === 'GET') {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    respond(res, memoryStore.memoryStats(ws.id)); return true;
+  }
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/memory\/export$/)) && method === 'GET') {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    respond(res, memoryStore.exportMemory(ws.id)); return true;
+  }
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/memory\/import$/)) && method === 'POST') {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    const b = await readBody(req, 16 * 1024 * 1024);
+    respond(res, memoryStore.importMemory(ws.id, b, { replace: b?.replace === true })); return true;
+  }
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/memory\/([^/]+)$/))) {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    const id = dec(m[2]);
+    if (method === 'GET') { respond(res, memoryStore.readMemory(ws.id, id)); return true; }
+    if (method === 'PUT') { respond(res, memoryStore.updateMemory(ws.id, id, await readBody(req, 64 * 1024))); return true; }
+    if (method === 'DELETE') { respond(res, memoryStore.deleteMemory(ws.id, id)); return true; }
   }
 
   // ---- Milestone 2: workspace write reservations (advisory locks) ----

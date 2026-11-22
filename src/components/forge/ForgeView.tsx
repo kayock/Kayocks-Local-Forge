@@ -39,7 +39,7 @@ import {
   GitBranch, Loader2, Link2, XCircle,
 } from 'lucide-react';
 
-type ForgeTab = 'projects' | 'fleet' | 'runs';
+type ForgeTab = 'projects' | 'fleet' | 'runs' | 'memory';
 
 const PROJECT_STATUS_COLORS: Record<string, string> = {
   NEW: 'bg-zinc-500/15 text-zinc-400 border-zinc-500/40',
@@ -78,6 +78,7 @@ export function ForgeView() {
                 <TabsTrigger value="projects">Projects</TabsTrigger>
                 <TabsTrigger value="fleet">Fleet</TabsTrigger>
                 <TabsTrigger value="runs">Live Runs</TabsTrigger>
+                <TabsTrigger value="memory">Memory</TabsTrigger>
               </TabsList>
             </Tabs>
             <Button size="sm" variant="outline" onClick={() => navigate('ide')}>Back to IDE</Button>
@@ -88,6 +89,7 @@ export function ForgeView() {
         {tab === 'projects' && <ProjectsHub />}
         {tab === 'fleet' && <FleetMap />}
         {tab === 'runs' && <LiveRuns />}
+        {tab === 'memory' && <MemoryPanel />}
       </div>
     </div>
   );
@@ -675,6 +677,221 @@ function LiveRuns() {
             <CardContent className="py-6 text-sm text-muted-foreground">Select a run to see its operation timeline, failures and recovery attempts.</CardContent>
           </Card>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Project Memory (Milestone 3) — inspect, search, edit, delete, reindex,
+// backup/restore. Everything an agent records is visible and manageable here.
+// ---------------------------------------------------------------------------
+
+const MEMORY_KINDS = ['decision', 'convention', 'bug', 'fact', 'outcome', 'test-history', 'preference', 'note'] as const;
+
+function MemoryPanel() {
+  const wsStore = useWorkspace();
+  const settings = useSettings();
+  const [stats, setStats] = useState<any>(null);
+  const [records, setRecords] = useState<any[]>([]);
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState<any[] | null>(null);
+  const [editing, setEditing] = useState<any | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [form, setForm] = useState({ kind: 'decision', content: '', tags: '' });
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const client = useMemo(() => new CompanionClient(() => settings.companion), [settings.companion]);
+
+  const refresh = useCallback(async () => {
+    if (!wsStore.workspaceId) return;
+    setBusy(true);
+    try {
+      const [st, list] = await Promise.all([
+        client.memoryStats(wsStore.workspaceId).catch(() => null),
+        client.memoryList(wsStore.workspaceId, { limit: 100 }).catch(() => ({ memories: [] })),
+      ]);
+      setStats(st);
+      setRecords(list.memories ?? []);
+    } finally { setBusy(false); }
+  }, [client, wsStore.workspaceId]);
+
+  useEffect(() => { refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [wsStore.workspaceId]);
+
+  const runSearch = async () => {
+    if (!wsStore.workspaceId || !query.trim()) return;
+    setBusy(true);
+    try {
+      const r = await client.memorySearch(wsStore.workspaceId, query.trim());
+      setResults(r.results);
+    } catch (e: any) { setNotice(`search failed: ${e.message}`); }
+    setBusy(false);
+  };
+
+  const saveNew = async () => {
+    if (!wsStore.workspaceId || !form.content.trim()) return;
+    setBusy(true);
+    try {
+      await client.memoryWrite(wsStore.workspaceId, {
+        kind: form.kind, content: form.content.trim(),
+        tags: form.tags.split(',').map((t) => t.trim()).filter(Boolean),
+        agentId: 'user',
+      });
+      setForm({ kind: 'decision', content: '', tags: '' });
+      setAdding(false);
+      setNotice('memory recorded');
+      refresh();
+    } catch (e: any) { setNotice(`write failed: ${e.message}`); }
+    setBusy(false);
+  };
+
+  const saveEdit = async () => {
+    if (!wsStore.workspaceId || !editing) return;
+    setBusy(true);
+    try {
+      await client.memoryUpdate(wsStore.workspaceId, editing.id, { content: editing.content, tags: editing.tags });
+      setEditing(null);
+      setNotice('memory updated');
+      refresh();
+    } catch (e: any) { setNotice(`update failed: ${e.message}`); }
+    setBusy(false);
+  };
+
+  const remove = async (id: string) => {
+    if (!wsStore.workspaceId) return;
+    try { await client.memoryDelete(wsStore.workspaceId, id); setNotice('memory deleted'); refresh(); } catch (e: any) { setNotice(`delete failed: ${e.message}`); }
+  };
+
+  const togglePin = async (m: any) => {
+    if (!wsStore.workspaceId) return;
+    try { await client.memoryUpdate(wsStore.workspaceId, m.id, { pinned: !m.pinned }); refresh(); } catch { /* ignore */ }
+  };
+
+  const reindex = async (full = false) => {
+    if (!wsStore.workspaceId) return;
+    setBusy(true);
+    try {
+      const r = await client.memoryIndex(wsStore.workspaceId, full);
+      setNotice(`indexed ${r.indexed} file(s), ${r.unchanged} unchanged, ${r.skippedSecrets} secret(s) excluded${r.note ? ` — ${r.note}` : ''}`);
+      refresh();
+    } catch (e: any) { setNotice(`reindex failed: ${e.message}`); }
+    setBusy(false);
+  };
+
+  const exportBackup = async () => {
+    if (!wsStore.workspaceId) return;
+    try {
+      const backup = await client.memoryExport(wsStore.workspaceId);
+      const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `localforge-memory-${wsStore.workspaceId}.json`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (e: any) { setNotice(`export failed: ${e.message}`); }
+  };
+
+  const importBackup = async (file: File) => {
+    if (!wsStore.workspaceId) return;
+    try {
+      const text = await file.text();
+      const backup = JSON.parse(text);
+      const r = await client.memoryImport(wsStore.workspaceId, backup);
+      setNotice(`restored ${r.restored} record(s), ${r.deduplicated} already known`);
+      refresh();
+    } catch (e: any) { setNotice(`import failed: ${e.message}`); }
+  };
+
+  const shown = results ?? records;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <p className="text-sm text-muted-foreground">
+          {stats ? (
+            <>
+              backend <span className="font-mono text-foreground">{stats.backend}</span>
+              {' '}· {stats.memories} record(s) ({stats.pinned} pinned)
+              {' '}· {stats.indexedFiles ?? 0} file(s) indexed
+              {' '}· agents recall this via <span className="font-mono">memory_search</span>
+            </>
+          ) : 'No workspace open — memory is per project.'}
+        </p>
+        <div className="flex gap-2">
+          <Button size="sm" variant="outline" onClick={() => reindex(false)} disabled={!wsStore.workspaceId || busy}><RefreshCw className="w-3.5 h-3.5 mr-1" /> Reindex files</Button>
+          <Button size="sm" variant="outline" onClick={exportBackup} disabled={!wsStore.workspaceId}>Export</Button>
+          <label className="cursor-pointer">
+            <input type="file" accept="application/json" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) importBackup(f); e.target.value = ''; }} />
+            <span className="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium h-8 px-3 border bg-transparent hover:bg-accent text-sm">Import</span>
+          </label>
+          <Button size="sm" onClick={() => setAdding(!adding)} disabled={!wsStore.workspaceId}><Plus className="w-3.5 h-3.5 mr-1" /> Add memory</Button>
+        </div>
+      </div>
+
+      {notice && <p className="text-xs text-primary">{notice}</p>}
+
+      {adding && (
+        <Card>
+          <CardContent className="py-3 space-y-2">
+            <div className="grid grid-cols-[160px_1fr] gap-2 items-end">
+              <div className="space-y-1"><Label>Kind</Label>
+                <select value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })} className="w-full h-8 rounded-md border bg-background px-2 text-sm">
+                  {MEMORY_KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
+                </select>
+              </div>
+              <div className="space-y-1"><Label>Tags (comma-separated)</Label><Input value={form.tags} onChange={(e) => setForm({ ...form, tags: e.target.value })} placeholder="storage, architecture" /></div>
+            </div>
+            <div className="space-y-1"><Label>Content</Label>
+              <Textarea value={form.content} onChange={(e) => setForm({ ...form, content: e.target.value })} placeholder="Concrete, self-contained knowledge a future agent can use without this conversation." className="min-h-20" />
+            </div>
+            <Button size="sm" onClick={saveNew} disabled={busy || !form.content.trim()}>Record</Button>
+          </CardContent>
+        </Card>
+      )}
+
+      <div className="flex gap-2">
+        <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search memory (FTS keyword + optional local-embedding hybrid)…" className="text-sm" onKeyDown={(e) => { if (e.key === 'Enter') runSearch(); }} />
+        <Button size="sm" variant="outline" onClick={runSearch} disabled={busy || !query.trim()}>Search</Button>
+        {results && <Button size="sm" variant="ghost" onClick={() => { setResults(null); setQuery(''); }}>clear</Button>}
+      </div>
+
+      <div className="space-y-2">
+        {shown.length === 0 && (
+          <Card><CardContent className="py-4 text-xs text-muted-foreground">
+            {results ? 'No memories match this search.' : 'No memories recorded yet. Agents record decisions/bugs/conventions automatically; you can add or edit anything here.'}
+          </CardContent></Card>
+        )}
+        {shown.map((m: any) => (
+          <Card key={m.id} className={m.pinned ? 'border-violet-500/40' : undefined}>
+            <CardContent className="py-2.5 text-xs space-y-1.5">
+              <div className="flex items-center gap-2">
+                <Badge variant="outline" className="text-[10px]">{m.kind}</Badge>
+                {m.pinned && <Badge variant="outline" className="text-[10px] text-violet-400 border-violet-500/40">pinned</Badge>}
+                {m.agentId && <span className="text-[10px] text-muted-foreground">by {m.agentId}</span>}
+                <span className="ml-auto text-[10px] text-muted-foreground">{new Date(m.updatedAt).toLocaleString()}</span>
+              </div>
+              {editing?.id === m.id ? (
+                <div className="space-y-2">
+                  <Textarea value={editing.content} onChange={(e) => setEditing({ ...editing, content: e.target.value })} className="min-h-16 text-xs" />
+                  <Input value={Array.isArray(editing.tags) ? editing.tags.join(',') : ''} onChange={(e) => setEditing({ ...editing, tags: e.target.value.split(',').map((t: string) => t.trim()).filter(Boolean) })} className="text-xs" placeholder="tags" />
+                  <div className="flex gap-2"><Button size="sm" className="h-7" onClick={saveEdit} disabled={busy}>Save</Button><Button size="sm" variant="ghost" className="h-7" onClick={() => setEditing(null)}>Cancel</Button></div>
+                </div>
+              ) : (
+                <>
+                  <p className="whitespace-pre-wrap leading-relaxed">{m.content}</p>
+                  {m.refs && <p className="text-[10px] text-muted-foreground font-mono">refs: {m.refs}</p>}
+                  {!!m.tags?.length && <div className="flex gap-1 flex-wrap">{m.tags.map((t: string) => <Badge key={t} variant="outline" className="text-[9px]">{t}</Badge>)}</div>}
+                  <div className="flex gap-1 pt-1">
+                    <Button size="sm" variant="ghost" className="h-6 px-2 text-[10px]" onClick={() => setEditing({ ...m })}>edit</Button>
+                    <Button size="sm" variant="ghost" className="h-6 px-2 text-[10px]" onClick={() => togglePin(m)}>{m.pinned ? 'unpin' : 'pin'}</Button>
+                    <Button size="sm" variant="ghost" className="h-6 px-2 text-[10px] text-red-400" onClick={() => remove(m.id)}>delete</Button>
+                  </div>
+                </>
+              )}
+            </CardContent>
+          </Card>
+        ))}
       </div>
     </div>
   );

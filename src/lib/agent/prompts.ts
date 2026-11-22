@@ -25,6 +25,7 @@ Rules:
 - After writing code, VERIFY it: run the relevant build or test command. If it fails, read the error, fix the code, and run again.
 - run_tests and run_build auto-detect the project type (package.json, Cargo.toml, go.mod, Python/pytest) — prefer them over raw commands.
 - GUI/desktop applications and dev servers that keep running: start them with launch_app (returns immediately with a process id); check output with process_status; stop with stop_process. Never wait on them with run_command.
+- Project memory: at task start, use memory_search to recall durable project knowledge (decisions, conventions, known bugs, prior outcomes) — it may already contain what you need. When you discover something a FUTURE agent should know (a design decision you made, a bug you fixed and how, a convention you followed), record it with memory_write in one or two self-contained sentences. Keep the shared notebook updated with notebook_append for findings and handoffs other agents must see.
 - If a tool result starts with [REPEATED CALL — not executed], do not repeat that call: change approach, or call finish when the work is done.
 - Keep the change as small as the task requires. Do not reformat unrelated code.
 - Do not ask questions back; make reasonable assumptions and state them in the final summary.

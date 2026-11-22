@@ -289,6 +289,10 @@ export class AgentRunner {
       // Forge upgrade: canonical workspace identity surfaced to every tool so
       // results can state the machine and absolute root they operated on.
       workspaceMeta: this.cfg.workspaceMeta,
+      // Milestone 3: durable project memory + shared notebook/scratchpad over
+      // the workspace host companion. Absent methods (mocks) → tools report
+      // availability honestly.
+      memory: this.buildMemoryHost(companion),
       // Forge upgrade (Part 6): shared local browser over CDP.
       browser: this.cfg.companionBrowser ? {
         open: (o) => this.cfg.companionBrowser!.open(workspaceId, o ?? {}),
@@ -298,6 +302,32 @@ export class AgentRunner {
         close: () => this.cfg.companionBrowser!.close(workspaceId),
         status: () => this.cfg.companionBrowser!.status(workspaceId),
       } : undefined,
+    };
+  }
+
+  // Milestone 3: memory host over the workspace-host companion. Every method
+  // degrades with a clear error when the companion lacks the memory API.
+  private buildMemoryHost(companion: CompanionClient): NonNullable<ToolContext['memory']> | undefined {
+    const c = companion as any;
+    if (typeof c.memorySearch !== 'function') return undefined;
+    const wsId = this.cfg.workspaceId;
+    const agentTag = this.cfg.workspaceMeta?.machineLabel ? `agent@${this.cfg.workspaceMeta.machineLabel}` : 'agent';
+    return {
+      search: (q, opts) => c.memorySearch(wsId, q, opts),
+      read: (id) => c.memoryRead(wsId, id),
+      write: (kind, content, opts) => c.memoryWrite(wsId, { kind, content, tags: opts?.tags, refs: opts?.refs, agentId: agentTag }),
+      notebookAppend: (kind, content, opts) => c.notebookAppend(wsId, { agentId: agentTag, kind, content, refs: opts?.refs }),
+      notebookSearch: (q, opts) => (async () => {
+        const r = await c.notebookList(wsId, opts);
+        const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
+        const results = (r.entries || []).filter((e: any) => {
+          const hay = `${e.kind} ${e.agentId} ${e.content}`.toLowerCase();
+          return terms.some((t) => hay.includes(t));
+        }).slice(0, opts?.limit ?? 20);
+        return { results };
+      })(),
+      readScratchpad: (agentId) => c.readScratchpad(wsId, agentId),
+      writeScratchpad: (agentId, patch) => c.writeScratchpad(wsId, agentId, patch),
     };
   }
 

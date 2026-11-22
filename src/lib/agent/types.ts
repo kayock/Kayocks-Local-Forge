@@ -92,6 +92,17 @@ export interface ToolContext {
     machineLabel: string; // e.g. "This computer", "Station", "Portable", "Windows Dell"
     platform: string;
   };
+  // Milestone 3: durable project memory + shared coordination surfaces.
+  // Optional so mock hosts and older companions degrade with clear messages.
+  memory?: {
+    search: (q: string, opts?: { kind?: string; limit?: number }) => Promise<{ query: string; results: { id: string; kind: string; content: string; tags: string[]; score?: number; updatedAt: number; refs?: string | null }[]; hybrid?: boolean }>;
+    read: (id: string) => Promise<{ id: string; kind: string; content: string; tags: string[]; refs?: string | null; updatedAt: number }>;
+    write: (kind: string, content: string, opts?: { tags?: string[]; refs?: string }) => Promise<{ id: string; deduplicated: boolean }>;
+    notebookAppend: (kind: string, content: string, opts?: { refs?: string }) => Promise<{ id?: string; seq?: number }>;
+    notebookSearch: (q: string, opts?: { kind?: string; limit?: number }) => Promise<{ results: { seq?: number; agentId: string; kind: string; content: string; refs?: string | null; at: number }[] }>;
+    readScratchpad: (agentId: string) => Promise<Record<string, unknown>>;
+    writeScratchpad: (agentId: string, patch: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  };
 }
 
 export interface ToolResult {

@@ -49,6 +49,28 @@ export class CompanionError extends Error {
   }
 }
 
+// Milestone 3: persistent project memory record
+export interface MemoryRecord {
+  id: string;
+  kind: string;
+  content: string;
+  tags: string[];
+  refs?: string | null;
+  source?: string | null;
+  agentId?: string | null;
+  pinned?: boolean;
+  superseded?: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface MemoryBackup {
+  format: 'localforge-memory-v1';
+  workspaceId: string;
+  exportedAt: string;
+  memories: MemoryRecord[];
+}
+
 type CfgGetter = () => CompanionConfig;
 
 export class CompanionClient {
@@ -262,6 +284,78 @@ export class CompanionClient {
 
   signalTerm(wsId: string, sessionId: string) {
     return this.req('POST', `/api/ws/${wsId}/term/signal`, { sessionId });
+  }
+
+  // ---- Milestone 3: persistent project memory (same base URL as /api/ws) ----
+  memoryList(wsId: string, opts?: { kind?: string; limit?: number }) {
+    const q: Record<string, string> = {};
+    if (opts?.kind) q.kind = opts.kind;
+    if (opts?.limit) q.limit = String(opts.limit);
+    return this.req<{ memories: MemoryRecord[]; backend?: string }>('GET', `/api/ws/${wsId}/memory`, undefined, q);
+  }
+
+  memorySearch(wsId: string, q: string, opts?: { kind?: string; limit?: number }) {
+    const query: Record<string, string> = { q };
+    if (opts?.kind) query.kind = opts.kind;
+    if (opts?.limit) query.limit = String(opts.limit);
+    return this.req<{ query: string; backend?: string; hybrid?: boolean; results: (MemoryRecord & { score: number })[] }>('GET', `/api/ws/${wsId}/memory/search`, undefined, query);
+  }
+
+  memoryRead(wsId: string, id: string) {
+    return this.req<MemoryRecord>('GET', `/api/ws/${wsId}/memory/${id}`);
+  }
+
+  memoryWrite(wsId: string, body: { kind: string; content: string; tags?: string[]; refs?: string; agentId?: string; pinned?: boolean }) {
+    return this.req<{ id: string; deduplicated: boolean; createdAt: number; updatedAt: number }>('POST', `/api/ws/${wsId}/memory`, body);
+  }
+
+  memoryUpdate(wsId: string, id: string, patch: { kind?: string; content?: string; tags?: string[]; refs?: string; pinned?: boolean }) {
+    return this.req<{ id: string; updated: boolean }>('PUT', `/api/ws/${wsId}/memory/${id}`, patch);
+  }
+
+  memoryDelete(wsId: string, id: string) {
+    return this.req<{ deleted: boolean }>('DELETE', `/api/ws/${wsId}/memory/${id}`);
+  }
+
+  memoryIndex(wsId: string, full = false) {
+    return this.req<{ indexed: number; unchanged: number; skippedSecrets: number; note?: string }>('POST', `/api/ws/${wsId}/memory/index`, { full });
+  }
+
+  memoryStats(wsId: string) {
+    return this.req<{ backend: string; memories: number; pinned: number; byKind: { kind: string; n: number }[]; indexedFiles: number; lastIndexedAt: number | null }>('GET', `/api/ws/${wsId}/memory/stats`);
+  }
+
+  memoryFileSearch(wsId: string, q: string) {
+    return this.req<{ query: string; results: { path: string; snippet: string }[] }>('GET', `/api/ws/${wsId}/memory/files`, undefined, { q });
+  }
+
+  memoryExport(wsId: string) {
+    return this.req<MemoryBackup>('GET', `/api/ws/${wsId}/memory/export`);
+  }
+
+  memoryImport(wsId: string, backup: MemoryBackup, replace = false) {
+    return this.req<{ restored: number; deduplicated: number; replaced: boolean }>('POST', `/api/ws/${wsId}/memory/import`, { ...backup, replace });
+  }
+
+  // ---- agent coordination surfaces (scratchpad/notebook) ----
+  readScratchpad(wsId: string, agentId: string) {
+    return this.req<any>('GET', `/api/agents/${wsId}/scratchpad/${agentId}`);
+  }
+
+  writeScratchpad(wsId: string, agentId: string, patch: Record<string, unknown>) {
+    return this.req<any>('PUT', `/api/agents/${wsId}/scratchpad/${agentId}`, patch);
+  }
+
+  notebookAppend(wsId: string, entry: { agentId: string; kind: string; content: string; refs?: string }) {
+    return this.req<any>('POST', `/api/agents/${wsId}/notebook`, entry);
+  }
+
+  notebookList(wsId: string, opts?: { since?: number; agent?: string; kind?: string }) {
+    const q: Record<string, string> = {};
+    if (opts?.since !== undefined) q.since = String(opts.since);
+    if (opts?.agent) q.agent = opts.agent;
+    if (opts?.kind) q.kind = opts.kind;
+    return this.req<{ entries: any[] }>('GET', `/api/agents/${wsId}/notebook`, undefined, q);
   }
 
   // ---- real PTY terminal (Milestone 1) ----

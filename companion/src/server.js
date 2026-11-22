@@ -43,6 +43,7 @@ import {
 import { mintPreviewToken, handlePreview, handleDevProxy } from './preview.js';
 import { routeControl, mesh, model } from './controlplane.js';
 import { startDiscovery, stopDiscovery, discoveryStatus } from './discovery.js';
+import { closeAllMemoryDbs } from './memory.js';
 
 await ensureHome();
 const state = loadState();
@@ -727,6 +728,7 @@ function shutdown() {
   // detached processes).
   closeHeadlessSessions().catch(() => {});
   stopDiscovery();
+  closeAllMemoryDbs(); // flush SQLite WAL before exit (Milestone 3)
   model.stopManagedModels();
   try { writeStatus({ stopping: true, stoppedAt: new Date().toISOString() }); } catch { /* ignore */ }
   server.close();

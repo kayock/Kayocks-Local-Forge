@@ -142,7 +142,7 @@ export async function peerStatus(id) {
 // agent needs (fs, exec, browser, revisions, locks, task packets) plus the
 // Phase-2 inventory/memory routes. /term and /pty streaming channels are NOT
 // proxied (buffered JSON only) — agents use /exec.
-const proxied = /^\/api\/(?:hardware|models(?:\/(?:dirs|load|unload|external|profiles(?:\/[\w.-]+)?|status\/[\w.:-]+|diagnostics\/[\w.:-]+|output\/[\w.:-]+))?|network(?:\/test)?|mesh\/discover|agents\/[\w-]+\/(?:scratchpad\/[\w.:-]+|notebook|assignments)|ws\/[\w-]+(?:\/(?:tree|file(?:\/append)?|mkdir|delete|rename|stat|search|exec|term(?:\/signal)?|proc\/(?:start|list|output|stop)|browser\/(?:open|navigate|eval|screenshot|verify|close|status)|diff\/preview|revision|locks|tasks(?:\/[\w-]+(?:\/(?:ack|progress|complete|fail|cancel))?))?))?$/;
+const proxied = /^\/api\/(?:hardware|models(?:\/(?:dirs|load|unload|external|profiles(?:\/[\w.-]+)?|status\/[\w.:-]+|diagnostics\/[\w.:-]+|output\/[\w.:-]+))?|network(?:\/test)?|mesh\/discover|agents\/[\w-]+\/(?:scratchpad\/[\w.:-]+|notebook|assignments)|ws\/[\w-]+(?:\/(?:tree|file(?:\/append)?|mkdir|delete|rename|stat|search|exec|term(?:\/signal)?|proc\/(?:start|list|output|stop)|browser\/(?:open|navigate|eval|screenshot|verify|close|status)|diff\/preview|revision|locks|tasks(?:\/[\w-]+(?:\/(?:ack|progress|complete|fail|cancel))?)?|memory(?:\/(?:search|files|index|stats|export|import|[\w-]{8,64}))?))?|memory\/capabilities)?$/;
 export async function proxyPeer(id, req, relativePath, query) {
   if (!proxied.test(relativePath) || relativePath.includes('..') || relativePath.includes('%')) bad('This route is not available through mesh proxy', 403);
   const peer = peerById(id); const token = readCredentials()[id];
