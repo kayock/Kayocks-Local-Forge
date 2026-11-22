@@ -206,7 +206,97 @@ export class MeshClient {
 
   // Workspace revision: hash over the primary workspace tree (paths+sizes)
   // used for change detection / conflict detection between agents.
-  async workspaceRevision(workspaceId: string): Promise<{ revision: string; entries: number }> {
-    return this.req('GET', `/api/ws/${workspaceId}/revision`);
+  async workspaceRevision(workspaceId: string, peerId?: string | null): Promise<{ revision: string; entries: number }> {
+    return this.req('GET', this.peerPath(peerId, `/api/ws/${workspaceId}/revision`));
   }
+
+  // ---- Milestone 2: mDNS discovery (never pairs; explicit user action) ----
+  async discover(): Promise<{
+    available: boolean; enabled?: boolean; reason?: string; serviceType?: string;
+    self?: { instanceId: string; name: string; port: number; host: string; advertising: boolean; lanAddresses: { iface: string; address: string }[] };
+    discovered: { instanceId: string; name: string; host: string; port: number; url: string; version: string; platform: string; online: boolean; secondsSinceSeen: number; local: boolean }[];
+  }> {
+    return this.req('GET', '/api/mesh/discover');
+  }
+
+  // ---- Milestone 2: cross-machine task packets ----
+  async createTask(workspaceId: string, task: {
+    title: string; contract?: string; requirements?: string[]; contextFiles?: string[];
+    workspaceMapping?: { local?: string; remote?: string; revision?: string };
+    assignedMachine?: string; machineId?: string; agentId?: string; dedupKey?: string;
+    dependsOn?: string[]; priority?: number;
+  }): Promise<{ task: FleetTask; deduplicated: boolean }> {
+    return this.req('POST', `/api/ws/${workspaceId}/tasks`, task);
+  }
+
+  async listTasks(workspaceId: string, opts: { status?: string; machineId?: string; since?: number } = {}, peerId?: string | null): Promise<{ tasks: FleetTask[]; serverTime: number }> {
+    const q: Record<string, string> = {};
+    if (opts.status) q.status = opts.status;
+    if (opts.machineId) q.machineId = opts.machineId;
+    if (opts.since !== undefined) q.since = String(opts.since);
+    return this.req('GET', this.peerPath(peerId, `/api/ws/${workspaceId}/tasks`), undefined, q);
+  }
+
+  async getTask(workspaceId: string, taskId: string, peerId?: string | null): Promise<{ task: FleetTask }> {
+    return this.req('GET', this.peerPath(peerId, `/api/ws/${workspaceId}/tasks/${taskId}`));
+  }
+
+  async ackTask(workspaceId: string, taskId: string, body: { agentId?: string; machineId?: string }, peerId?: string | null) {
+    return this.req('POST', this.peerPath(peerId, `/api/ws/${workspaceId}/tasks/${taskId}/ack`), body);
+  }
+
+  async taskProgress(workspaceId: string, taskId: string, body: { note: string; status?: string }, peerId?: string | null) {
+    return this.req('POST', this.peerPath(peerId, `/api/ws/${workspaceId}/tasks/${taskId}/progress`), body);
+  }
+
+  async completeTask(workspaceId: string, taskId: string, body: { summary: string; artifacts?: { path: string; bytes?: number }[]; filesChanged?: string[]; revisionAfter?: string; evidence?: { kind: string; detail: string }[] }, peerId?: string | null) {
+    return this.req('POST', this.peerPath(peerId, `/api/ws/${workspaceId}/tasks/${taskId}/complete`), body);
+  }
+
+  async failTask(workspaceId: string, taskId: string, body: { reason: string; recoverable?: boolean }, peerId?: string | null) {
+    return this.req('POST', this.peerPath(peerId, `/api/ws/${workspaceId}/tasks/${taskId}/fail`), body);
+  }
+
+  async cancelTask(workspaceId: string, taskId: string, body: { reason?: string }, peerId?: string | null) {
+    return this.req('POST', this.peerPath(peerId, `/api/ws/${workspaceId}/tasks/${taskId}/cancel`), body);
+  }
+
+  // ---- Milestone 2: workspace write reservations ----
+  async listLocks(workspaceId: string, peerId?: string | null): Promise<{ reservations: { path: string; owner: string; expiresAt: number; createdAt: number }[] }> {
+    return this.req('GET', this.peerPath(peerId, `/api/ws/${workspaceId}/locks`));
+  }
+
+  async acquireLock(workspaceId: string, path: string, owner: string, opts?: { ttlMs?: number }, peerId?: string | null): Promise<{ locked: boolean; reservation?: { path: string; owner: string; expiresAt: number } }> {
+    return this.req('POST', this.peerPath(peerId, `/api/ws/${workspaceId}/locks`), { path, owner, ttlMs: opts?.ttlMs });
+  }
+
+  async releaseLock(workspaceId: string, path: string, owner: string, peerId?: string | null): Promise<{ released: boolean }> {
+    return this.req('POST', this.peerPath(peerId, `/api/ws/${workspaceId}/locks`), { path, owner, release: true });
+  }
+}
+
+export interface FleetTask {
+  id: string;
+  wsId: string;
+  title: string;
+  contract?: string | null;
+  requirements: string[];
+  contextFiles: string[];
+  workspaceMapping?: { local?: string | null; remote?: string | null; revision?: string | null } | null;
+  assignedMachine?: string | null;
+  machineId?: string | null;
+  agentId?: string | null;
+  dedupKey?: string | null;
+  dependsOn: string[];
+  priority: number;
+  status: 'queued' | 'acknowledged' | 'in-progress' | 'completed' | 'failed' | 'cancelled';
+  progress: { note: string; at: number }[];
+  result?: { summary: string; artifacts: { path: string; bytes: number | null }[]; filesChanged: string[]; revisionAfter?: string | null } | null;
+  error?: { reason: string; recoverable: boolean } | null;
+  evidence: { kind: string; detail: string; at: number }[];
+  attempts: number;
+  createdAt: number;
+  updatedAt: number;
+  acknowledgedAt?: number | null;
+  endedAt?: number | null;
 }

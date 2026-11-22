@@ -5,6 +5,9 @@ import { hardwareInventory } from './platform.js';
 import * as model from './modelmgr.js';
 import * as mesh from './mesh.js';
 import * as memory from './agentmem.js';
+import * as tasks from './tasks.js';
+import * as coordination from './coordination.js';
+import { discoveryStatus } from './discovery.js';
 import { loadModel as legacyLoad, unloadModel as legacyUnload } from './providers.js';
 
 function respond(res, data) { return sendJson(res, data?.status >= 400 ? data.status : 200, data); }
@@ -42,6 +45,7 @@ export async function routeControl(req, res, url, p) {
   if (p === '/api/network' && method === 'POST') { respond(res, mesh.setNetwork(await readBody(req, 32*1024))); return true; }
   if (p === '/api/network/test' && method === 'POST') { respond(res, await mesh.networkTest((await readBody(req, 32*1024)).url)); return true; }
   if (p === '/api/mesh/status' && method === 'GET') { respond(res, mesh.meshStatus()); return true; }
+  if (p === '/api/mesh/discover' && method === 'GET') { respond(res, discoveryStatus()); return true; }
   if (p === '/api/mesh/connect' && method === 'POST') {
     const b = await readBody(req, 32*1024);
     respond(res, await mesh.connectPeer(b.url, b)); return true;
@@ -77,6 +81,40 @@ export async function routeControl(req, res, url, p) {
   if ((m = match(p, /^\/api\/ws\/([^/]+)\/revision$/)) && method === 'GET') {
     const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
     respond(res, await memory.workspaceRevision(ws)); return true;
+  }
+
+  // ---- Milestone 2: cross-machine task packets ----
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/tasks$/))) {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    if (method === 'GET') { respond(res, tasks.listTasks(ws.id, url.searchParams)); return true; }
+    if (method === 'POST') { respond(res, tasks.createTask(ws.id, await readBody(req, 128 * 1024))); return true; }
+  }
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/tasks\/([^/]+)\/(ack|progress|complete|fail|cancel)$/)) && method === 'POST') {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    const id = dec(m[2]);
+    const body = await readBody(req, 128 * 1024).catch(() => ({}));
+    const action = m[3];
+    if (action === 'ack') respond(res, tasks.ackTask(ws.id, id, body));
+    else if (action === 'progress') respond(res, tasks.progressTask(ws.id, id, body));
+    else if (action === 'complete') respond(res, tasks.completeTask(ws.id, id, body));
+    else if (action === 'fail') respond(res, tasks.failTask(ws.id, id, body));
+    else respond(res, tasks.cancelTask(ws.id, id, body));
+    return true;
+  }
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/tasks\/([^/]+)$/)) && method === 'GET') {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    respond(res, tasks.getTask(ws.id, dec(m[2]))); return true;
+  }
+
+  // ---- Milestone 2: workspace write reservations (advisory locks) ----
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/locks$/))) {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    if (method === 'GET') { respond(res, coordination.listLocks(ws.id)); return true; }
+    if (method === 'POST') {
+      const b = await readBody(req, 16 * 1024);
+      respond(res, b.release ? coordination.releaseLock(ws.id, b.path, b.owner) : coordination.acquireLock(ws.id, b.path, b.owner, b));
+      return true;
+    }
   }
   return false;
 }

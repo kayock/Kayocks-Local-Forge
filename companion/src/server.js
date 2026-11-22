@@ -42,6 +42,7 @@ import {
 } from './providers.js';
 import { mintPreviewToken, handlePreview, handleDevProxy } from './preview.js';
 import { routeControl, mesh, model } from './controlplane.js';
+import { startDiscovery, stopDiscovery, discoveryStatus } from './discovery.js';
 
 await ensureHome();
 const state = loadState();
@@ -678,6 +679,14 @@ server.listen(config.port, config.host, () => {
   config.port = boundPort;
   console.log(BANNER);
   console.log(`  Listening on http://${config.host}:${boundPort}`);
+  // Milestone 2: mDNS advertisement + browsing (never pairs automatically;
+  // the pairing code flow stays the only access grant). Disable with --no-mdns.
+  const disc = startDiscovery({ enabled: !config.noMdns });
+  if (disc.started) {
+    console.log(`  LAN discovery: advertising via mDNS (${disc.serviceType}). Peers can find this machine; pairing still requires your code.`);
+  } else if (disc.reason) {
+    console.log(`  LAN discovery unavailable: ${disc.reason} — manual IP entry works as usual.`);
+  }
   if (config.host !== '127.0.0.1' && !config.lan) {
     console.log('  WARNING: binding to a non-loopback address. Pass --lan to acknowledge.');
   }
@@ -717,6 +726,7 @@ function shutdown() {
   // (visible windows belong to the user and stay open, same policy as
   // detached processes).
   closeHeadlessSessions().catch(() => {});
+  stopDiscovery();
   model.stopManagedModels();
   try { writeStatus({ stopping: true, stoppedAt: new Date().toISOString() }); } catch { /* ignore */ }
   server.close();

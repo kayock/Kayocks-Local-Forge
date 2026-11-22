@@ -27,6 +27,7 @@
   ],
   "license": "MIT",
   "optionalDependencies": {
+    "bonjour-service": "^1.4.4",
     "node-pty": "^1.1.0"
   }
 }

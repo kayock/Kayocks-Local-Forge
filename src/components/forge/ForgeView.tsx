@@ -30,12 +30,13 @@ import { useAgent } from '@/lib/store/agent';
 import { useWorkspace } from '@/lib/store/workspace';
 import { useSettings } from '@/lib/store/settings';
 import { useRouter } from '@/lib/store/router';
+import { useMesh } from '@/lib/store/mesh';
 import { CompanionClient } from '@/lib/companion/client';
 import { contractPromptBlock } from '@/lib/agent/task-contract';
 import {
-  Activity, ChevronDown, ChevronRight, FolderOpen, Network, Plus, RefreshCw,
+  Activity, ChevronDown, ChevronRight, FolderOpen, Network, Plus, Radar, RefreshCw,
   Rocket, Send, Server, Square, Trash2, Play, Wrench, AlertTriangle, ShieldCheck,
-  GitBranch, Loader2,
+  GitBranch, Loader2, Link2, XCircle,
 } from 'lucide-react';
 
 type ForgeTab = 'projects' | 'fleet' | 'runs';
@@ -263,10 +264,59 @@ function FleetMap() {
   const wsStore = useWorkspace();
   const runs = useRuns();
   const agent = useAgent();
+  const mesh = useMesh();
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState({ label: '', role: '', url: 'http://' });
   const [checking, setChecking] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
+  // Milestone 2: mDNS discovery (advertisement + browse; pairing stays manual)
+  const [discovery, setDiscovery] = useState<any>(null);
+  const [discovering, setDiscovering] = useState(false);
+  const [pairCodeFor, setPairCodeFor] = useState<string | null>(null);
+  const [pairCode, setPairCode] = useState('');
+  const [fleetTasks, setFleetTasks] = useState<any[] | null>(null);
+
+  const runDiscovery = useCallback(async () => {
+    setDiscovering(true);
+    try {
+      const mc = mesh.client();
+      const d = await mc.discover();
+      setDiscovery(d);
+    } catch (e: any) {
+      setDiscovery({ available: false, reason: String(e?.message || e).slice(0, 160), discovered: [] });
+    }
+    setDiscovering(false);
+  }, [mesh]);
+
+  // Milestone 2: fleet task packets for the active workspace
+  const refreshFleetTasks = useCallback(async () => {
+    if (!wsStore.workspaceId) { setFleetTasks(null); return; }
+    try {
+      const mc = mesh.client();
+      const r = await mc.listTasks(wsStore.workspaceId);
+      setFleetTasks(r.tasks.slice(0, 20));
+    } catch { setFleetTasks(null); }
+  }, [mesh, wsStore.workspaceId]);
+
+  const connectDiscovered = useCallback(async (url: string, code?: string) => {
+    try {
+      const mc = mesh.client();
+      const r = await mc.connectPeer(url, { name: undefined, code, deviceLabel: 'LocalForge Fleet Map' });
+      await mesh.refreshMesh();
+      // add to the map as a paired machine
+      const existing = fleet.machines.find((m) => m.url === url);
+      if (!existing) {
+        fleet.addMachine({ label: r.peer.name || url, role: 'paired LAN companion (mesh)', url, hasToken: true, state: 'paired' });
+      } else {
+        fleet.updateMachine(existing.id, { state: 'paired', hasToken: true });
+      }
+      setPairCodeFor(null);
+      setPairCode('');
+      return true;
+    } catch {
+      return false;
+    }
+  }, [mesh, fleet]);
 
   // seed with this machine on first load
   useEffect(() => {
@@ -340,10 +390,54 @@ function FleetMap() {
           {' '}Handoffs recorded: {handoffs}
         </p>
         <div className="flex gap-2">
+          <Button size="sm" variant="outline" onClick={() => { setAdding(!adding); runDiscovery(); }}><Radar className="w-3.5 h-3.5 mr-1" /> Discover LAN</Button>
           <Button size="sm" variant="outline" onClick={() => setAdding(!adding)}><Plus className="w-3.5 h-3.5 mr-1" /> Add machine</Button>
           <Button size="sm" onClick={refreshAll} disabled={checking}>{checking ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <RefreshCw className="w-3.5 h-3.5 mr-1" />} Refresh</Button>
         </div>
       </div>
+
+      {discovery && (
+        <Card>
+          <CardHeader className="pb-1"><CardTitle className="text-sm flex items-center gap-2"><Radar className="w-4 h-4 text-violet-400" /> LAN discovery (mDNS)</CardTitle></CardHeader>
+          <CardContent className="text-xs space-y-2">
+            {!discovery.available && <p className="text-muted-foreground">Discovery unavailable: {discovery.reason || 'mDNS not supported here'} — manual IP entry below keeps working.</p>}
+            {discovery.available && (
+              <p className="text-muted-foreground">
+                Advertising: <span className={discovery.self?.advertising ? 'text-green-500' : 'text-yellow-500'}>{discovery.self?.advertising ? 'yes' : 'no'}</span>
+                {' '}· self: <span className="font-mono">{discovery.self?.name} #{discovery.self?.port}</span>
+                {' '}· found {discovery.discovered?.length ?? 0} other companion(s). Discovery never pairs automatically — connecting asks for the peer's pairing code.
+              </p>
+            )}
+            {!!discovery.discovered?.length && (
+              <div className="space-y-1.5">
+                {discovery.discovered.map((d: any) => (
+                  <div key={d.instanceId} className="flex items-center gap-2 rounded border border-white/10 px-2 py-1.5">
+                    <span className={`w-2 h-2 rounded-full shrink-0 ${d.online ? 'bg-green-500' : 'bg-zinc-600'}`} title={d.online ? 'online' : `last seen ${d.secondsSinceSeen}s ago`} />
+                    <span className="font-medium">{d.name}</span>
+                    <span className="font-mono text-[10px] text-muted-foreground truncate">{d.host}:{d.port}</span>
+                    {d.version && <Badge variant="outline" className="text-[9px] shrink-0">v{d.version}</Badge>}
+                    {d.platform && <Badge variant="outline" className="text-[9px] shrink-0">{d.platform}</Badge>}
+                    <span className="ml-auto flex gap-1 shrink-0">
+                      {pairCodeFor === d.instanceId ? (
+                        <>
+                          <Input value={pairCode} onChange={(e) => setPairCode(e.target.value.toUpperCase())} placeholder="PAIRING CODE" className="h-6 w-36 text-[11px] font-mono" />
+                          <Button size="sm" className="h-6 px-2 text-[10px]" onClick={() => connectDiscovered(d.url, pairCode)}><Link2 className="w-3 h-3 mr-1" /> Pair</Button>
+                          <Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => { setPairCodeFor(null); setPairCode(''); }}><XCircle className="w-3 h-3" /></Button>
+                        </>
+                      ) : (
+                        <>
+                          <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]" onClick={() => { setForm({ ...form, url: d.url }); setAdding(true); }}>Use URL</Button>
+                          <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]" onClick={() => setPairCodeFor(d.instanceId)}><Link2 className="w-3 h-3 mr-1" /> Connect</Button>
+                        </>
+                      )}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {adding && (
         <Card>
@@ -415,6 +509,32 @@ function FleetMap() {
               <CardContent className="py-4 text-xs text-muted-foreground">
                 Select a machine node to inspect connection, companion, resources, workspaces and live activity.
                 Machine labels and roles are yours to edit; states come only from real probes.
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Milestone 2: fleet task packets on the active workspace */}
+          {wsStore.workspaceId && (
+            <Card>
+              <CardHeader className="pb-1">
+                <CardTitle className="text-sm flex items-center justify-between">
+                  Fleet tasks
+                  <Button size="sm" variant="ghost" className="h-6 px-2" onClick={refreshFleetTasks}><RefreshCw className="w-3 h-3 mr-1" /> refresh</Button>
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="text-xs space-y-1.5">
+                {fleetTasks === null && <p className="text-muted-foreground">Press refresh to load task packets for this workspace.</p>}
+                {fleetTasks?.length === 0 && <p className="text-muted-foreground">No task packets yet — distributed fan-out creates them here.</p>}
+                {fleetTasks?.map((t: any) => (
+                  <div key={t.id} className="flex items-center gap-2 rounded border border-white/10 px-2 py-1">
+                    <Badge variant="outline" className={`text-[9px] shrink-0 ${t.status === 'completed' ? 'text-green-500 border-green-500/40' : t.status === 'failed' ? 'text-red-500 border-red-500/40' : t.status === 'cancelled' ? 'text-zinc-500' : 'text-blue-400 border-blue-500/40'}`}>{t.status}</Badge>
+                    <span className="truncate">{t.title}</span>
+                    <span className="ml-auto text-[10px] text-muted-foreground shrink-0">{t.assignedMachine || t.machineId || 'unassigned'} · {t.progress?.length ?? 0} updates</span>
+                    {['queued', 'acknowledged', 'in-progress'].includes(t.status) && (
+                      <Button size="sm" variant="ghost" className="h-5 px-1.5 text-[10px] text-red-400 shrink-0" onClick={async () => { try { await mesh.client().cancelTask(wsStore.workspaceId!, t.id, { reason: 'cancelled from Fleet Map' }); refreshFleetTasks(); } catch { /* ignore */ } }}>cancel</Button>
+                    )}
+                  </div>
+                ))}
               </CardContent>
             </Card>
           )}

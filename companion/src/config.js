@@ -21,6 +21,7 @@ export function parseArgs(argv) {
     else if (a === '--workspace') out.workspace = argv[++i];
     else if (a === '--show-code') out.showCode = true;
     else if (a === '--lan') out.lan = true;
+    else if (a === '--no-mdns') out.noMdns = true;
     else if (a === '--no-browser-hint') out.noHint = true;
     // Tray/installer integration: keep a small JSON status file (port, pid,
     // pairing code, workspaces, devices) next to the state dir so a GUI can
@@ -47,6 +48,7 @@ export const config = {
   showCode: !!args.showCode,
   statusFile: args.statusFile || null,
   help: !!args.help,
+  noMdns: !!args.noMdns,
 };
 
 // Windows installers put per-user app data in %LOCALAPPDATA%; keep the POSIX
