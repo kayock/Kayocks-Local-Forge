@@ -9,7 +9,7 @@
   },
   "scripts": {
     "start": "node src/server.js",
-    "test": "node --test test/companion.test.mjs test/server.integration.test.mjs test/inference-timeout.test.mjs test/fs-boundary.test.mjs test/controlplane.integration.test.mjs"
+    "test": "node --test test/companion.test.mjs test/server.integration.test.mjs test/inference-timeout.test.mjs test/fs-boundary.test.mjs test/controlplane.integration.test.mjs test/m1-pty.test.mjs test/m2-fleet.test.mjs test/m3-memory.test.mjs"
   },
   "engines": {
     "node": ">=20"
