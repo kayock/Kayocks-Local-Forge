@@ -38,7 +38,7 @@ describe('fleet participation defaults', () => {
     expect(isPlaceholderEndpoint('http://127.0.0.1:11434', 'llama3.2:3b')).toBe(false);
   });
 
-  test('Windows is refused unless this run explicitly selects it, and never via :8080', () => {
+  test('Windows is refused unless this run explicitly selects it', () => {
     expect(() => assertFleetParticipants([
       { machineId: 'w1', name: 'Windows', platform: 'win32', baseUrl: 'http://127.0.0.1:11434', model: 'x' },
     ])).toThrow(/manual-only/);
@@ -48,8 +48,16 @@ describe('fleet participation defaults', () => {
     ]);
     expect(allowed.map((p) => p.machineId)).toEqual(['p1', 'w1']);
     expect(() => assertFleetParticipants([
-      { machineId: 'w1', name: 'Windows', platform: 'win32', baseUrl: 'http://127.0.0.1:8080/v1', model: 'x', explicitRun: true },
-    ])).toThrow(/excluded/);
+      { machineId: 'w1', name: 'Windows', platform: 'win32', baseUrl: 'http://127.0.0.1:8080/v1', model: 'Qwen3-30B-A3B-Q4_K_M' },
+    ])).toThrow(/excluded|automatic/);
+    const explicitServer = assertFleetParticipants([
+      { machineId: 'w1', name: 'Windows', platform: 'win32', baseUrl: 'http://127.0.0.1:8080/v1', model: 'Qwen3-30B-A3B-Q4_K_M', explicitRun: true },
+    ]);
+    expect(explicitServer[0].participation).toBe('manual');
+    expect(allowAutomatic('manual', true)).toBe(false);
+    expect(() => assertFleetParticipants([
+      { machineId: 'w1', name: 'Windows', platform: 'win32', baseUrl: 'http://127.0.0.1:8080/v1', model: 'qwen3-coder-30b-a3b-instruct', explicitRun: true },
+    ])).toThrow(/endpoint/);
   });
 
   test('Portable being the only enabled worker is accepted without Windows', () => {

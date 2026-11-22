@@ -86,8 +86,11 @@ export function assertFleetParticipants<T extends FleetParticipant>(participants
       problems.push(`${label}: select an inference endpoint before starting`);
       continue;
     }
-    if (isExcludedWindowsLlama(p.baseUrl, p)) {
-      problems.push(`${label}: 127.0.0.1:8080 is excluded from LocalForge routing`);
+    // Loopback :8080 is not an automatic route. An explicit selection of the
+    // server that is actually running there is allowed for this run only.
+    // allowAutomatic stays false, so a failure elsewhere cannot move work onto it.
+    if (isExcludedWindowsLlama(p.baseUrl, p) && !p.explicitRun) {
+      problems.push(`${label}: 127.0.0.1:8080 is excluded from automatic LocalForge routing`);
       continue;
     }
     if (mode === 'enabled' || p.explicitRun) allowed.push({ ...p, participation: mode });
