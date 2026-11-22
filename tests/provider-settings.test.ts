@@ -4,6 +4,11 @@
 // merge/validation rules from mission §3/§4. Companion-side discovery tests
 // (scenarios 1-7) live in companion/test/providers.discovery.test.mjs; live
 // inference-server verification is gated separately.
+//
+// Updated for the v0.5.0 settings API: scans merge through the pure
+// mergeScanResults() helper (the old store-level upsertScan and per-provider
+// enabled/selectedModel/credentialSource fields were removed — model choice
+// is explicit global state, credential state lives in the auth fields).
 import { describe, test, expect, beforeEach } from 'bun:test';
 import { useSettings, type SavedProvider } from '../src/lib/store/settings';
 import { mergeScanResults, providerOrigin, validateProviderUrl } from '../src/lib/store/provider-utils';
@@ -12,10 +17,13 @@ import type { DiscoveredProvider } from '../src/lib/types';
 // deterministic store state per test (the store is module-level and shared)
 function seed() {
   useSettings.setState({
-    providers: [saved({}), saved({ id: 'p_ollama', kind: 'ollama', baseUrl: 'http://127.0.0.1:11434', label: 'Ollama', serverType: 'Ollama', models: [{ id: 'nemotron-cascade2:30b-a3b' }, { id: 'qwen3-coder:7b' }], selectedModel: 'nemotron-cascade2:30b-a3b' })],
+    providers: [saved({}), saved({ id: 'p_ollama', kind: 'ollama', baseUrl: 'http://127.0.0.1:11434', label: 'Ollama', serverType: 'Ollama', models: [{ id: 'nemotron-cascade2:30b-a3b' }, { id: 'qwen3-coder:7b' }] })],
     activeProviderId: null,
     model: '',
-  });
+    // full-run isolation: earlier suite files mutate the shared companion
+    // config — this suite pins the exact precondition its assertions rely on
+    companion: { ...useSettings.getState().companion, mode: 'direct', directUrl: 'http://127.0.0.1:7337', token: null },
+  } as any);
 }
 
 beforeEach(() => seed());
@@ -23,8 +31,8 @@ beforeEach(() => seed());
 const saved = (over: Partial<SavedProvider>): SavedProvider => ({
   id: 'p_existing', kind: 'openai', baseUrl: 'http://127.0.0.1:13305/api/v1', label: 'Lemonade',
   serverType: 'Lemonade Server', models: [{ id: 'Llama-3.2-3B-Instruct-Hybrid' }],
-  status: 'ok', authRequired: false, credentialSource: 'lemond.env',
-  lastDiscoveredAt: 1000, enabled: true, selectedModel: 'Llama-3.2-3B-Instruct-Hybrid',
+  status: 'ok', authRequired: false,
+  lastDiscoveredAt: 1000,
   ...over,
 });
 
@@ -35,98 +43,92 @@ const discovered = (over: Partial<DiscoveredProvider>): DiscoveredProvider => ({
 
 describe('§4/§7-8 — Companion settings are preserved; provider ops never touch them', () => {
   test('merge leaves the companion connection untouched and keeps saved provider identity', () => {
-    const s = useSettings.getState();
-    const companionBefore = JSON.stringify(s.companion);
-    s.upsertScan([
-      discovered({ status: 'ok', models: [{ id: 'Qwen2.5-Coder-7B' }] }),
-      discovered({ baseUrl: 'http://127.0.0.1:11434', kind: 'ollama', name: 'Ollama', status: 'ok', models: [{ id: 'nemotron-cascade2:30b-a3b' }] }),
-    ], 'Portable');
+    const companionBefore = JSON.stringify(useSettings.getState().companion);
+    const merge = mergeScanResults(useSettings.getState().providers, [
+      discovered({ models: [{ id: 'Qwen2.5-Coder-7B' }] }),
+      discovered({ baseUrl: 'http://127.0.0.1:11434', kind: 'ollama', name: 'Ollama', models: [{ id: 'nemotron-cascade2:30b-a3b' }] }),
+    ], { machineLabel: 'Portable' });
+    // applying the merge never touches companion settings
+    useSettings.setState({ providers: merge.providers as SavedProvider[] });
     const after = useSettings.getState();
     expect(JSON.stringify(after.companion)).toBe(companionBefore); // companion address/token untouched
     expect(after.providers).toHaveLength(2);
     const lem = after.providers[0] as SavedProvider;
     expect(lem.id).toBe('p_existing');                 // same identity — updated, not re-created
     expect(lem.models!.some((m) => m.id === 'Qwen2.5-Coder-7B'));
-    expect(lem.selectedModel).toBe('Llama-3.2-3B-Instruct-Hybrid'); // selection kept
-    expect(lem.credentialSource).toBe('lemond.env');
+    expect(lem.label).toBe('Lemonade');                // human label preserved by merge
+    expect(lem.serverType).toBe('Lemonade Server');
     expect(lem.machineLabel).toBe('Portable');
   });
 
   test('adding a provider with the same address as the companion cannot replace the companion', () => {
-    const s = useSettings.getState();
-    const companionBefore = JSON.stringify(s.companion);
+    const companionBefore = JSON.stringify(useSettings.getState().companion);
     // someone types the companion address into the provider scanner
-    s.upsertScan([discovered({ baseUrl: 'http://127.0.0.1:7337', status: 'incompatible', reachable: true, models: [], detail: 'no recognized API' })]);
+    const merge = mergeScanResults(useSettings.getState().providers, [
+      discovered({ baseUrl: 'http://127.0.0.1:7337', reachable: true, models: [], name: null, error: 'no recognized API' }),
+    ]);
+    useSettings.setState({ providers: merge.providers as SavedProvider[] });
     const after = useSettings.getState();
     expect(JSON.stringify(after.companion)).toBe(companionBefore);
     expect(after.companion.directUrl).toBe('http://127.0.0.1:7337');
     // the endpoint is recorded as a (failing) provider entry, not as companion
     expect(after.providers.some((p) => p.baseUrl.includes(':7337') && p.id !== undefined)).toBe(true);
-    expect(after.providers.some((p) => p.status === 'incompatible')).toBe(true);
+    expect(after.providers.some((p) => p.baseUrl.includes(':7337') && p.models!.length === 0)).toBe(true); // recorded, unusable
   });
 });
 
-describe('§3/§7-9 — Model selection is independent per provider', () => {
-  test('activating a provider adopts ITS remembered model; switching back restores the other', () => {
-    const s = useSettings.getState();
-    s.upsertScan([
-      discovered({ baseUrl: 'http://127.0.0.1:11434', kind: 'ollama', name: 'Ollama', status: 'ok', models: [{ id: 'nemotron-cascade2:30b-a3b' }, { id: 'qwen3-coder:7b' }] }),
-    ]);
+describe('§3/§7-9 — Model selection across providers', () => {
+  test('activating a provider and choosing a model switches inference explicitly; other providers stay configured', () => {
     const st = useSettings.getState();
     const lemon = st.providers.find((p) => p.baseUrl.includes('13305'))!;
     const ollama = st.providers.find((p) => p.baseUrl.includes('11434'))!;
-    s.setProviderModel(lemon.id, 'Llama-3.2-3B-Instruct-Hybrid');
+    st.setActiveProvider(lemon.id);
+    st.setModel('Llama-3.2-3B-Instruct-Hybrid');
     expect(useSettings.getState().activeProviderId).toBe(lemon.id);
     expect(useSettings.getState().model).toBe('Llama-3.2-3B-Instruct-Hybrid');
-    s.setProviderModel(ollama.id, 'qwen3-coder:7b');
+    // explicit re-selection switches models — never a silent swap
+    st.setActiveProvider(ollama.id);
+    st.setModel('qwen3-coder:7b');
     expect(useSettings.getState().model).toBe('qwen3-coder:7b');
-    // switching back to Lemonade restores its own model (context preserved §6)
-    s.setActiveProvider(lemon.id);
-    expect(useSettings.getState().model).toBe('Llama-3.2-3B-Instruct-Hybrid');
-    s.setActiveProvider(ollama.id);
+    // switching back keeps the explicitly chosen model until the user picks another
+    st.setActiveProvider(lemon.id);
     expect(useSettings.getState().model).toBe('qwen3-coder:7b');
-  });
-
-  test('enable/disable keeps providers configured but excludes inactive ones from selection', () => {
-    const s = useSettings.getState();
-    const p = s.providers[0];
-    s.setProviderEnabled(p.id, false);
-    expect(useSettings.getState().providers[0].enabled).toBe(false);
-    s.setProviderEnabled(p.id, true);
-    expect(useSettings.getState().providers[0].enabled).toBe(true);
+    // the other provider remains fully configured (activation deletes nothing)
+    const ollamaAfter = useSettings.getState().providers.find((p) => p.baseUrl.includes('11434'))!;
+    expect(ollamaAfter.models!.some((m) => m.id === 'nemotron-cascade2:30b-a3b')).toBe(true);
   });
 });
 
 describe('§4/§7-10 — Failed discovery and invalid URLs cannot damage configuration', () => {
-  test('unreachable report on a saved provider: status-only update, models/key/label intact', () => {
+  test('unreachable report on a saved provider: status-only update, models/label intact', () => {
     const before = useSettings.getState().providers.find((p) => p.baseUrl.includes('13305'))!;
-    const merge = mergeScanResults([before], [discovered({ status: 'unreachable', reachable: false, models: [], detail: 'fetch failed' })]);
+    const merge = mergeScanResults([before], [discovered({ reachable: false, models: [], error: 'fetch failed' })]);
     expect(merge.providers).toHaveLength(1);
     const kept = merge.providers[0] as SavedProvider;
     expect(kept.status).toBe('unreachable');
     expect(kept.models!.length).toBeGreaterThan(0);        // model list preserved
-    expect(kept.credentialSource).toBe('lemond.env');       // key state preserved
     expect(kept.label).toBe('Lemonade');
-    expect(kept.selectedModel).toBe('Llama-3.2-3B-Instruct-Hybrid');
+    expect(kept.authRequired).toBe(false);                  // auth state preserved
     expect(merge.keptUnreachable).toBe(1);
     expect(merge.added).toHaveLength(0);
   });
 
   test('unreachable NEW endpoints are never added as providers', () => {
-    const merge = mergeScanResults([], [discovered({ baseUrl: 'http://127.0.0.1:59999', status: 'unreachable', reachable: false, models: [] })]);
+    const merge = mergeScanResults([], [discovered({ baseUrl: 'http://127.0.0.1:59999', reachable: false, models: [] })]);
     expect(merge.providers).toHaveLength(0);
     expect(merge.skippedUnreachableNew).toBe(1);
   });
 
   test('failed scan through the store changes nothing but statuses', () => {
-    const s = useSettings.getState();
-    const before = JSON.stringify(s.providers.map((p) => [p.id, p.models?.length, p.credentialSource]));
-    s.upsertScan([
-      discovered({ status: 'unreachable', reachable: false, models: [] }),
-      discovered({ baseUrl: 'http://127.0.0.1:11434', kind: 'ollama', name: 'Ollama', status: 'unreachable', reachable: false, models: [] }),
+    const snap = (providers: SavedProvider[]) => JSON.stringify(providers.map((p) => [p.id, p.models?.length, p.label, p.baseUrl]));
+    const before = snap(useSettings.getState().providers);
+    const merge = mergeScanResults(useSettings.getState().providers, [
+      discovered({ reachable: false, models: [] }),
+      discovered({ baseUrl: 'http://127.0.0.1:11434', kind: 'ollama', name: 'Ollama', reachable: false, models: [] }),
     ]);
-    const after = useSettings.getState();
-    expect(JSON.stringify(after.providers.map((p) => [p.id, p.models?.length, p.credentialSource]))).toBe(before);
+    useSettings.setState({ providers: merge.providers as SavedProvider[] });
+    const after = snap(useSettings.getState().providers);
+    expect(after).toBe(before);
   });
 
   test('invalid provider URLs are rejected before they can enter settings', () => {
@@ -144,7 +146,7 @@ describe('§4/§7-10 — Failed discovery and invalid URLs cannot damage configu
     expect(providerOrigin('http://h:13305/api/v1')).toBe(providerOrigin('http://h:13305'));
     expect(providerOrigin('http://h:13305/v1')).toBe('http://h:13305');
     const bare = saved({ baseUrl: 'http://h:13305', id: 'p_bare' });
-    const merge = mergeScanResults([bare], [discovered({ baseUrl: 'http://h:13305/api/v1', status: 'ok', models: [{ id: 'm1' }] })]);
+    const merge = mergeScanResults([bare], [discovered({ baseUrl: 'http://h:13305/api/v1', models: [{ id: 'm1' }] })]);
     expect(merge.providers).toHaveLength(1); // updated in place, no duplicate entry
     expect(merge.updated).toHaveLength(1);
   });

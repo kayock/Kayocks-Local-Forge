@@ -32,6 +32,8 @@ import { AgentPanel } from './AgentPanel';
 import { TerminalPanel } from './TerminalPanel';
 import { PreviewPanel } from './PreviewPanel';
 import { ToolLogPanel } from './ToolLogPanel';
+import { DiagnosticsPanel } from './DiagnosticsPanel';
+import { Stethoscope } from 'lucide-react';
 import { CompanionClient } from '@/lib/companion/client';
 import { useSettings } from '@/lib/store/settings';
 import { useWorkspace } from '@/lib/store/workspace';
@@ -40,17 +42,19 @@ import { useRuns } from '@/lib/store/runs';
 import { useProjects } from '@/lib/store/projects';
 import { useRouter } from '@/lib/store/router';
 import { useAuth } from '@/lib/store/auth';
+import { useMesh } from '@/lib/store/mesh';
 import { AgentRunner } from '@/lib/agent/runner';
 import { PipelineRunner } from '@/lib/agent/orchestrator';
-import { agentSystemPrompt, type WorkspaceContext } from '@/lib/agent/prompts';
+import { agentSystemPrompt, projectGuidanceBlock, type WorkspaceContext } from '@/lib/agent/prompts';
 import { CORE_TOOLS } from '@/lib/agent/tools';
 import { createContract, contractPromptBlock, buildHandoffPacket, markSteeringApplied, recordProgress, setStatus as setContractStatus, waiveRequirement } from '@/lib/agent/task-contract';
 import type { AgentEvent, AgentMessage, ToolProtocolMode, CompletionResult } from '@/lib/agent/types';
 import { resolveInferenceParams } from '@/lib/types';
+import { useTaskSessions } from '@/lib/store/task-sessions';
 import type { TaskContract } from '@/lib/agent/task-contract';
 import { toast } from '@/hooks/use-toast';
 
-type BottomTab = 'terminal' | 'preview' | 'toollog';
+type BottomTab = 'terminal' | 'preview' | 'toollog' | 'diagnostics';
 type LeftTab = 'explorer' | 'git';
 
 export function IdeView() {
@@ -71,6 +75,8 @@ export function IdeView() {
   const [workspaceRoot, setWorkspaceRoot] = useState<string>('');
   const abortRef = useRef<AbortController | null>(null);
   const runnerRef = useRef<AgentRunner | PipelineRunner | null>(null);
+  const sessionRef = useRef<string | null>(null);
+  const resumeSessionRef = useRef<string | null>(null);
   const toolMsgMap = useRef<Map<string, string>>(new Map()); // toolLogId -> chat msg id
   const runOpMap = useRef<Map<string, string>>(new Map());   // toolLogId -> run op id
   // message history of the last turn-limited run, for "Continue task"
@@ -260,8 +266,22 @@ export function IdeView() {
     return null;
   }, [settings.autoEscalate, settings.providers, settings.activeProviderId]);
 
-  const runAgent = useCallback(async (task: string, opts?: { resumeMessages?: AgentMessage[]; resumeModel?: string | null }) => {
+  const runAgent = useCallback(async (task: string, optsIn?: { resumeMessages?: AgentMessage[]; resumeModel?: string | null; resumeSessionId?: string }) => {
+    let opts: { resumeMessages?: AgentMessage[]; resumeModel?: string | null; resumeSessionId?: string } = optsIn ?? {};
     if (!ws.workspaceId) return;
+    // Durable session resume: seed the recorded history as context.
+    if (opts?.resumeSessionId) {
+      resumeSessionRef.current = opts.resumeSessionId;
+      const prior = useTaskSessions.getState().sessions.find((x) => x.id === opts.resumeSessionId);
+      if (prior?.messages.length && !opts.resumeMessages) {
+        opts = {
+          ...opts,
+          resumeMessages: prior.messages.slice(-10).map((m) => ({ role: m.role as any, content: m.content })) as AgentMessage[],
+        };
+      }
+    } else {
+      resumeSessionRef.current = null;
+    }
     if (!settings.providers.find((p) => p.id === settings.activeProviderId) || !settings.model) {
       toast({ title: 'No model selected', description: 'Open Settings → Discover providers, then pick a model.', variant: 'destructive' });
       return;
@@ -366,6 +386,11 @@ export function IdeView() {
                       status: e.entry.status,
                       output: e.entry.output,
                       durMs: e.entry.endedAt ? e.entry.endedAt - e.entry.startedAt : undefined,
+                      // Milestone 1: structured write/edit results
+                      diff: e.entry.diff,
+                      diffPath: e.entry.diffPath,
+                      changedFile: e.entry.changedFile,
+                      workspaceRevision: e.entry.workspaceRevision ?? undefined,
                     },
                   }
                 : m
@@ -411,6 +436,23 @@ export function IdeView() {
         runs.addOp(runId, { kind: 'recovery', summary: e.message.slice(0, 200), status: 'blocked' });
         return;
       }
+      if ((e as any).type === 'recovery_action') {
+        const ra = e as any;
+        agent.addMessage({ role: 'system', content: `♻ Recovery ${ra.step}/2 (${ra.action}) after ${ra.stallClass} stall` });
+        runs.addOp(runId, { kind: 'recovery', summary: `Recovery ${ra.step}/2: ${ra.action} (${ra.stallClass} stall)`, status: 'blocked' });
+        return;
+      }
+      if ((e as any).type === 'stalled') {
+        runs.addOp(runId, { kind: 'recovery', summary: 'STALLED — run stopped honestly, progress preserved', status: 'error' });
+        return;
+      }
+      if (e.type === 'diff_preview') {
+        // Milestone 1: file writes/edits show a diff in the timeline (the full
+        // unified diff lives on the tool card; the op carries the summary).
+        const first = e.diff.split('\n').find((l) => l.startsWith('@@')) || '';
+        runs.addOp(runId, { kind: 'tool', tool: 'diff', summary: `diff: ${e.path} ${first.slice(0, 120)}`, status: 'ok', detail: e.diff.slice(0, 4000) });
+        return;
+      }
       if (e.type === 'escalation') {
         const msg = `Escalation ${e.fromModel} → ${e.toModel ?? '(next configured model)'}: ${e.reason}`;
         agent.addMessage({ role: 'system', content: `🔀 ${msg}` });
@@ -444,6 +486,16 @@ export function IdeView() {
         if (assistantId) agent.finalizeMessage(assistantId);
         if (e.content) agent.addMessage({ role: 'assistant', content: e.content, stage: (e as any).stage });
         if (e.note) agent.addMessage({ role: 'system', content: `ℹ ${e.note}` });
+        // durable session: record the outcome honestly (paused/done/failed)
+        if (sessionRef.current) {
+          const ss = useTaskSessions.getState();
+          const sid = sessionRef.current;
+          ss.appendMessage(sid, 'assistant', String(e.content || e.note || '').slice(0, 2000));
+          const note = String(e.note || '');
+          const status = /Paused|paused/.test(note) ? 'paused' : /STALLED|stopped/i.test(note) ? 'failed' : (e.content ? 'done' : 'paused');
+          const contractSnap = contractRef.current ? { status: contractRef.current.status, statusNote: contractRef.current.statusNote, requirements: (contractRef.current.requirements ?? []).map((r: any) => ({ text: r.text, met: !!r.met })) } : null;
+          ss.updateSession(sid, { status, contract: contractSnap });
+        }
         // Problem D: the coordinator verdict, not the model's claim
         const completion = (e as any).completion as CompletionResult | undefined;
         if (completion) {
@@ -470,9 +522,34 @@ export function IdeView() {
 
       // Problem C: the contract block leads every non-chat system prompt —
       // requirements survive compaction because the block is re-sent each run.
-      const basePrompt = agentSystemPrompt(wsCtx, agentMode === 'chat' ? 'chat' : 'task');
-      const systemPrompt = contract ? `${contractPromptBlock(contract, { role: agentMode === 'pipeline' ? 'pipeline stage' : 'task agent' })}\n\n=== RUNTIME ===\n${basePrompt}` : basePrompt;
+      const basePrompt = agentSystemPrompt(wsCtx, agentMode === 'chat' ? 'chat' : 'task', settings.agentDevMode);
+      // Project rules & skills (RC3): loaded from .localforge/ on the workspace host
+      let guidanceBlock = '';
+      try {
+        const g = await client.getProjectGuidance(ws.workspaceId);
+        guidanceBlock = projectGuidanceBlock(g.rules, g.skills ?? [], task);
+      } catch { /* older companion / no guidance — fine */ }
+      const systemPrompt = [contract ? contractPromptBlock(contract, { role: agentMode === 'pipeline' ? 'pipeline stage' : 'task agent' }) : '', guidanceBlock, basePrompt].filter(Boolean).join('\n\n');
       if (contract) persistContract(contract);
+
+      // Durable task session (RC3): every run is recorded and resumable.
+      const sessions = useTaskSessions.getState();
+      let session = sessions.createSession(ws.workspaceId, task);
+      if (resumeSessionRef.current) {
+        sessions.updateSession(resumeSessionRef.current, { status: 'active' });
+        const existing = sessions.sessions.find((x) => x.id === resumeSessionRef.current);
+        if (existing) session = existing;
+      }
+      if (session) {
+        sessionRef.current = session.id;
+        sessions.updateSession(session.id, { contract: contract ? { status: contract.status, statusNote: contract.statusNote, requirements: contract.requirements.map((r) => ({ text: r.text, met: (r as any).status ? (r as any).status === 'met' : false })) } : null, modelsUsed: [...new Set([...session.modelsUsed, settings.model])] });
+        sessions.appendMessage(session.id, 'user', task);
+      }
+      // Safety checkpoint before the first mutating run (shadow git, honest no-op when git is missing)
+      try {
+        const cp = await client.createCheckpoint(ws.workspaceId, `before: ${task.slice(0, 60)}`);
+        if (cp?.available && cp.checkpoint && session) useTaskSessions.getState().addCheckpoint(session.id, cp.checkpoint);
+      } catch { /* checkpoints unavailable — workspace files untouched */ }
 
       if (agentMode === 'pipeline') {
         const pipeline = new PipelineRunner({
@@ -501,6 +578,7 @@ export function IdeView() {
           provider: activeProviderCfg,
           model: settings.model,
           params: resolveInferenceParams(settings.inference),
+          devMode: settings.agentDevMode,
           systemPrompt,
           task: resumeMessages ? 'Continue the task from exactly where you left off. Do not redo work that already succeeded; verify remaining work, then call finish.' : task,
           contextMessages: resumeMessages,
@@ -517,6 +595,22 @@ export function IdeView() {
           workspaceMeta,
           contract: contract ?? undefined,
           onContractUpdate: persistContract,
+          // Milestone 1: surface the workspace revision in FS-write tool
+          // results (cached briefly — the revision walks the whole workspace).
+          fetchWorkspaceRevision: (() => {
+            let cached: { rev: string; at: number } | null = null;
+            const wsId = String(ws.workspaceId || '');
+            return async () => {
+              if (!wsId) return null;
+              if (cached && Date.now() - cached.at < 10_000) return cached.rev;
+              try {
+                const mc = useMesh.getState().client();
+                const r = await mc.workspaceRevision(wsId);
+                cached = { rev: r.revision, at: Date.now() };
+                return r.revision;
+              } catch { return null; }
+            };
+          })(),
           onDialectLearned: (dialect, model) => settings.recordModelDialect(activeProviderCfg.baseUrl, model, dialect),
           escalateTo: escalateTarget,
           companionBrowser: {
@@ -699,11 +793,13 @@ export function IdeView() {
                     <TabsTrigger value="terminal" className="rounded-none h-8 px-3 text-xs data-[state=active]:bg-card">Terminal</TabsTrigger>
                     <TabsTrigger value="preview" className="rounded-none h-8 px-3 text-xs data-[state=active]:bg-card">Preview</TabsTrigger>
                     <TabsTrigger value="toollog" className="rounded-none h-8 px-3 text-xs data-[state=active]:bg-card">Tool log</TabsTrigger>
+                    <TabsTrigger value="diagnostics" className="gap-1.5 text-xs"><Stethoscope className="w-3.5 h-3.5" /> Diagnostics</TabsTrigger>
                   </TabsList>
                   <div className="flex-1 min-h-0">
                     {bottomTab === 'terminal' && <TerminalPanel client={client} active={bottomTab === 'terminal'} />}
                     {bottomTab === 'preview' && <PreviewPanel client={client} active={bottomTab === 'preview'} />}
                     {bottomTab === 'toollog' && <ToolLogPanel />}
+                    {bottomTab === 'diagnostics' && <DiagnosticsPanel client={client} />}
                   </div>
                 </Tabs>
               </ResizablePanel>

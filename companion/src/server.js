@@ -21,11 +21,16 @@ import {
   config, VERSION, ensureHome, loadState, getState, saveState,
   addToken, log, upsertWorkspace, removeWorkspace, findWorkspace, workspaceId,
   isTokenValid, resetPairingCode, writeStatus,
+  reportPlatform,
 } from './config.js';
 import { sendJson, readBody, handlePreflight, withCors } from './http-utils.js';
 import { handlePair, authOk, extractToken } from './auth.js';
 import * as fsapi from './fsapi.js';
-import { runCommand, makeSessionRegistry, killSession, screenCommand } from './exec.js';
+import { runCommand, makeSessionRegistry, killSession, screenCommand, getExecLog } from './exec.js';
+import {
+  ptyCapabilities, startSession, writeInput, resizeSession, signalSession,
+  stopSession, listSessions, attachSubscriber, scrollback as ptyScrollback, stopAllSessions,
+} from './pty.js';
 import { startProc, listProcs, procOutput, stopProc } from './procs.js';
 import {
   browserOpen, browserNavigate, browserEval, browserScreenshot, browserVerify,
@@ -38,6 +43,8 @@ import {
 } from './providers.js';
 import { mintPreviewToken, handlePreview, handleDevProxy } from './preview.js';
 import { routeControl, mesh, model } from './controlplane.js';
+import { startDiscovery, stopDiscovery, discoveryStatus } from './discovery.js';
+import { closeAllMemoryDbs } from './memory.js';
 
 await ensureHome();
 const state = loadState();
@@ -88,7 +95,7 @@ const server = http.createServer(async (req, res) => {
       const osmod = await import('node:os');
       return sendJson(res, 200, {
         ok: true, name: 'localforge-companion', version: VERSION,
-        platform: process.platform, host: config.host, port: config.port,
+        platform: reportPlatform(), host: config.host, port: config.port,
         paired: getState().tokens.length > 0,
         workspaces: getState().workspaces.map((w) => ({ id: w.id, name: w.name, path: w.path })),
         resources: {
@@ -147,6 +154,12 @@ async function routeApi(req, res, url, p) {
   if (await routeControl(req, res, url, p)) return;
   const method = req.method;
 
+  if (p === '/api/pty/capabilities' && method === 'GET') {
+    // Milestone 1: tells the IDE whether a real PTY terminal is available or
+    // the NDJSON streaming terminal remains the active backend.
+    return sendJson(res, 200, ptyCapabilities());
+  }
+
   // ---- workspaces ----
   if (p === '/api/workspaces' && method === 'GET') {
     return sendJson(res, 200, { workspaces: getState().workspaces });
@@ -203,10 +216,19 @@ async function routeApi(req, res, url, p) {
     }
     if (sub === '/file' && method === 'PUT') {
       const body = await readBody(req);
-      const r = await fsapi.writeFileContent(ws, body.path, body.content ?? '', { createDirs: body.createDirs !== false });
+      const r = await fsapi.writeFileContent(ws, body.path, body.content ?? '', {
+        createDirs: body.createDirs !== false,
+        ifUnmodifiedSince: body.ifUnmodifiedSince ?? null,
+        returnDiff: body.returnDiff === true,
+      });
       log('fs_write', { wsId: ws.id, path: body.path, bytes: r.bytes });
       broadcastEvent('fs_write', { workspaceId: ws.id, path: body.path });
       return sendJson(res, 200, r);
+    }
+    if (sub === '/diff/preview' && method === 'POST') {
+      // Milestone 1: unified diff BEFORE a write is approved. Read-only.
+      const body = await readBody(req, 2 * 1024 * 1024);
+      return sendJson(res, 200, await fsapi.previewDiff(ws, body.path, body.content ?? ''));
     }
     if (sub === '/file/append' && method === 'POST') {
       // Large-file assembly (tool-call repair mission): append text to a
@@ -280,7 +302,15 @@ async function routeApi(req, res, url, p) {
       });
       log('exec_end', { wsId: ws.id, exitCode: r.exitCode, durMs: r.durMs, timedOut: r.timedOut });
       broadcastEvent('exec_end', { workspaceId: ws.id, exitCode: r.exitCode, durMs: r.durMs });
-      return sendJson(res, 200, { ...r, cwd: r.cwd ? relativeTo(ws.path, r.cwd) : null });
+      return sendJson(res, 200, { ...r, cwd: r.cwd ? relativeTo(ws.path, r.cwd) : null, execLogId: r.execLogId });
+    }
+    if (sub === '/exec/log' && method === 'GET') {
+      // Complete output of a recently executed command (tool results truncate
+      // for the model; the human can always open the full log here).
+      const id = url.searchParams.get('id') || '';
+      const rec = getExecLog(id);
+      if (!rec) return sendJson(res, 404, { error: `Unknown exec log: ${id}` });
+      return sendJson(res, 200, rec);
     }
 
     // streaming terminal (NDJSON): POST {cmd, cwd, sessionId}
@@ -330,6 +360,61 @@ async function routeApi(req, res, url, p) {
       const body = await readBody(req, 8 * 1024);
       const ok = killSession(sessions, body.sessionId);
       return sendJson(res, 200, { signaled: ok });
+    }
+
+    // ---- real PTY terminal sessions (Milestone 1) ----
+    // A persistent interactive shell per session. node-pty optional: without
+    // it, start returns 501 {unavailable, fallback:'ndjson-stream'} and the
+    // existing NDJSON terminal keeps working untouched.
+    if (sub === '/pty/start' && method === 'POST') {
+      const body = await readBody(req, 32 * 1024);
+      const r = startSession(ws.id, body);
+      log('pty_start', { wsId: ws.id, sessionId: r.sessionId });
+      broadcastEvent('pty_start', { workspaceId: ws.id, sessionId: r.sessionId });
+      return sendJson(res, 200, r);
+    }
+    if (sub === '/pty/list' && method === 'GET') {
+      return sendJson(res, 200, { sessions: listSessions(ws.id), capabilities: ptyCapabilities() });
+    }
+    if (sub === '/pty/input' && method === 'POST') {
+      const body = await readBody(req, 64 * 1024);
+      const ok = writeInput(body.sessionId, typeof body.data === 'string' ? body.data : '');
+      return sendJson(res, ok ? 200 : 404, { ok });
+    }
+    if (sub === '/pty/resize' && method === 'POST') {
+      const body = await readBody(req, 8 * 1024);
+      const ok = resizeSession(body.sessionId, body.cols, body.rows);
+      return sendJson(res, ok ? 200 : 404, { ok });
+    }
+    if (sub === '/pty/signal' && method === 'POST') {
+      const body = await readBody(req, 8 * 1024);
+      const ok = signalSession(body.sessionId, body.signal);
+      return sendJson(res, ok ? 200 : 404, { ok });
+    }
+    if (sub === '/pty/stop' && method === 'POST') {
+      const body = await readBody(req, 8 * 1024);
+      const ok = stopSession(body.sessionId);
+      if (ok) broadcastEvent('pty_stop', { workspaceId: ws.id, sessionId: body.sessionId });
+      return sendJson(res, ok ? 200 : 404, { stopped: ok });
+    }
+    if (sub === '/pty/output' && method === 'GET') {
+      // SSE stream of one session's output; replay scrollback first so a
+      // reconnecting terminal resumes exactly where it left off.
+      const sessionId = url.searchParams.get('sessionId') || '';
+      const rec = ptyScrollback(sessionId);
+      if (!rec) return sendJson(res, 404, { error: 'Unknown PTY session' });
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-store',
+        Connection: 'keep-alive',
+        'X-Accel-Buffering': 'no',
+      });
+      if (rec.data) res.write(`data: ${JSON.stringify({ t: 'out', sessionId, d: rec.data, replay: true })}\n\n`);
+      const rec2 = attachSubscriber(sessionId, res);
+      res.write(`data: ${JSON.stringify({ t: 'attached', sessionId, exited: rec2.exited, cols: rec2.cols, rows: rec2.rows })}\n\n`);
+      const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch { /* ignore */ } }, 15000);
+      res.on('close', () => clearInterval(ping));
+      return;
     }
 
     // ---- detached processes (GUI/desktop apps, dev servers): start returns
@@ -596,6 +681,14 @@ server.listen(config.port, config.host, () => {
   config.port = boundPort;
   console.log(BANNER);
   console.log(`  Listening on http://${config.host}:${boundPort}`);
+  // Milestone 2: mDNS advertisement + browsing (never pairs automatically;
+  // the pairing code flow stays the only access grant). Disable with --no-mdns.
+  const disc = startDiscovery({ enabled: !config.noMdns });
+  if (disc.started) {
+    console.log(`  LAN discovery: advertising via mDNS (${disc.serviceType}). Peers can find this machine; pairing still requires your code.`);
+  } else if (disc.reason) {
+    console.log(`  LAN discovery unavailable: ${disc.reason} — manual IP entry works as usual.`);
+  }
   if (config.host !== '127.0.0.1' && !config.lan) {
     console.log('  WARNING: binding to a non-loopback address. Pass --lan to acknowledge.');
   }
@@ -627,10 +720,16 @@ function shutdown() {
     if (killSession(sessions, id)) killed++;
   }
   if (killed) console.log(`  Stopped ${killed} running session(s).`);
+  // Milestone 1: reap every PTY shell (interactive terminals) too.
+  let ptysKilled = 0;
+  try { ptysKilled = stopAllSessions(); } catch { /* ignore */ }
+  if (ptysKilled) console.log(`  Closed ${ptysKilled} PTY terminal(s).`);
   // Close headless browser sessions started for automated verification
   // (visible windows belong to the user and stay open, same policy as
   // detached processes).
   closeHeadlessSessions().catch(() => {});
+  stopDiscovery();
+  closeAllMemoryDbs(); // flush SQLite WAL before exit (Milestone 3)
   model.stopManagedModels();
   try { writeStatus({ stopping: true, stoppedAt: new Date().toISOString() }); } catch { /* ignore */ }
   server.close();

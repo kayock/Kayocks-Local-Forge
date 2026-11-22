@@ -185,8 +185,30 @@ process.on('SIGTERM',()=>s.close(()=>process.exit(0)));
   assert.ok(peerStatus.json.hardware.cpuCores>0);
   const proxied=await a.api('GET',`/api/mesh/${peer}/proxy/api/models`);
   assert.equal(proxied.code,200);assert.ok(proxied.json.ollama);
-  const denied=await a.api('POST',`/api/mesh/${peer}/proxy/api/ws/${ws}/exec`,{cmd:'echo unsafe'});
-  assert.equal(denied.code,403,'Mesh proxy may not bypass local workspace execution controls');
+  // Milestone 2: the proxy now carries the workspace tool surface for
+  // distributed orchestration. The security invariant moved with it: the
+  // DESTINATION companion enforces all of its own controls (command
+  // screening, workspace jail, pairing auth) — proxying cannot bypass them.
+  // Workspace ids are bound to the directory realpath, so the destination
+  // must have the folder authorized as its own workspace for proxied
+  // workspace routes to resolve (otherwise 404 — correct isolation).
+  const openedB=await b.api('POST','/api/workspaces',{path:project,name:'fixture-on-b'});
+  assert.equal(openedB.code,200);
+  const wsB=openedB.json.workspace.id;
+  const proxiedExec=await a.api('POST',`/api/mesh/${peer}/proxy/api/ws/${wsB}/exec`,{cmd:'echo proxied-works'});
+  assert.equal(proxiedExec.code,200,'Proxied exec runs on the destination companion');
+  assert.equal(proxiedExec.json.exitCode,0);
+  const denyAtDest=await a.api('POST',`/api/mesh/${peer}/proxy/api/ws/${wsB}/exec`,{cmd:'rm -rf /'});
+  assert.equal(denyAtDest.code,400,'Destination companion hard-deny list still applies through the proxy');
+  // a directory authorized ONLY on A (different realpath ⇒ different id) is
+  // unreachable through B's proxy
+  const projectOnlyA=path.join(temp,'project-only-a');fs.mkdirSync(projectOnlyA);
+  const openedOnlyA=await a.api('POST','/api/workspaces',{path:projectOnlyA,name:'only-a'});
+  assert.equal(openedOnlyA.code,200);
+  const unknownWs=await a.api('POST',`/api/mesh/${peer}/proxy/api/ws/${openedOnlyA.json.workspace.id}/exec`,{cmd:'echo nope'});
+  assert.equal(unknownWs.code,404,'Workspaces the destination has not authorized are unreachable through the proxy');
+  const notProxied=await a.api('POST',`/api/mesh/${peer}/proxy/api/pairing/reset`,{});
+  assert.equal(notProxied.code,403,'Routes outside the allowlist stay proxy-blocked');
   assert.ok(fs.existsSync(path.join(a.home,'mesh-peer-credentials.json')));
   assert.equal((await a.api('DELETE',`/api/mesh/peers/${peer}`)).json.removed,true);
   assert.equal((await a.api('GET',`/api/mesh/${peer}/proxy/api/models`)).code,404);

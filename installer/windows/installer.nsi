@@ -37,7 +37,7 @@ RequestExecutionLevel user
 SetCompressor /SOLID lzma
 
 !define MUI_ABORTWARNING
-!define MUI_FINISHPAGE_RUN "$INSTDIR\LocalForgeTray.exe"
+!define MUI_FINISHPAGE_RUN "$INSTDIR\LocalForgeCompanion\LocalForgeTray.exe"
 !define MUI_FINISHPAGE_RUN_TEXT "Start the LocalForge Companion tray now"
 !define MUI_FINISHPAGE_RUN_CHECKED
 
@@ -60,6 +60,13 @@ Section "LocalForge Companion (required)" SEC_CORE
   SetOutPath "$INSTDIR\LocalForgeCompanion"
   File "..\..\download\windows\LocalForgeCompanion\localforge-companion.exe"
   File "..\..\download\windows\LocalForgeCompanion\LocalForgeTray.exe"
+  File "..\..\download\windows\LocalForgeCompanion\LocalForgePtyInterrupt.exe"
+
+  ; Real PTY backend: prebuilt node-pty sidecar loaded at runtime from
+  ; <exe-dir>/pty-sidecar/node-pty (companion/src/pty.js resolves it relative
+  ; to the installed executable). Without this directory the companion falls
+  ; back to the NDJSON streaming terminal.
+  File /r "..\..\download\windows\LocalForgeCompanion\pty-sidecar"
 
   ; registry: uninstall info + install dir memory
   WriteRegStr HKCU "Software\LocalForge\Companion" "InstallDir" "$INSTDIR"
@@ -83,7 +90,7 @@ SectionEnd
 
 Section "Start Menu shortcut" SEC_SM
   CreateDirectory "$SMPROGRAMS\LocalForge"
-  CreateShortcut "$SMPROGRAMS\LocalForge\LocalForge Companion.lnk" "$INSTDIR\LocalForgeTray.exe" \
+  CreateShortcut "$SMPROGRAMS\LocalForge\LocalForge Companion.lnk" "$INSTDIR\LocalForgeCompanion\LocalForgeTray.exe" \
                  "" "$INSTDIR\LocalForgeCompanion"
   CreateShortcut "$SMPROGRAMS\LocalForge\LocalForge IDE (website).lnk" "${PRODUCT_URL}" \
                  "" "$INSTDIR\LocalForgeCompanion"
@@ -91,13 +98,13 @@ Section "Start Menu shortcut" SEC_SM
 SectionEnd
 
 Section /o "Desktop shortcut" SEC_DESK
-  CreateShortcut "$DESKTOP\LocalForge Companion.lnk" "$INSTDIR\LocalForgeTray.exe" \
+  CreateShortcut "$DESKTOP\LocalForge Companion.lnk" "$INSTDIR\LocalForgeCompanion\LocalForgeTray.exe" \
                  "" "$INSTDIR\LocalForgeCompanion"
 SectionEnd
 
 Section /o "Start with Windows (run companion at login)" SEC_AUTORUN
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "LocalForgeCompanionTray" \
-                 '"$INSTDIR\LocalForgeTray.exe" /minimize'
+                 '"$INSTDIR\LocalForgeCompanion\LocalForgeTray.exe" /minimize'
 SectionEnd
 
 ; ---- descriptions on the components page ----
@@ -117,6 +124,8 @@ Section "Uninstall"
   ExecWait 'taskkill.exe /IM LocalForgeTray.exe /T /F'
   Delete "$INSTDIR\LocalForgeCompanion\localforge-companion.exe"
   Delete "$INSTDIR\LocalForgeCompanion\LocalForgeTray.exe"
+  Delete "$INSTDIR\LocalForgeCompanion\LocalForgePtyInterrupt.exe"
+  RMDir /r "$INSTDIR\LocalForgeCompanion\pty-sidecar"
   RMDir "$INSTDIR\LocalForgeCompanion"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"

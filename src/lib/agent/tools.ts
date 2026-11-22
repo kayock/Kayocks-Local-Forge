@@ -55,6 +55,7 @@ const TOOL_ALIASES: Record<string, string> = {
   cat: 'read_file', open_file: 'read_file', view_file: 'read_file', view: 'read_file',
   write: 'write_file', create_file: 'write_file', save_file: 'write_file', save: 'write_file',
   edit: 'edit_file', replace_in_file: 'edit_file', str_replace_editor: 'edit_file', apply_patch: 'edit_file', patch_file: 'edit_file',
+  append: 'append_file', append_to_file: 'append_file', add_to_file: 'append_file',
   mkdir: 'create_dir', make_dir: 'create_dir',
   rm: 'delete_path', remove: 'delete_path', remove_path: 'delete_path', delete_file: 'delete_path',
   grep: 'search_project', search: 'search_project', search_files: 'search_project', find_in_files: 'search_project',
@@ -72,6 +73,8 @@ const TOOL_ALIASES: Record<string, string> = {
 
 // Per-parameter aliases. Applied AFTER tool-name resolution; e.g. a model that
 // calls edit_file with {path, old_content, new_content} still succeeds.
+const Buffer_is = (s: string) => `${new TextEncoder().encode(s).length} bytes`;
+
 const PATH_ALIASES = ['file', 'filepath', 'file_path', 'filename', 'file_name', 'target', 'dir', 'directory', 'folder'];
 const COMMAND_ALIASES = ['cmd', 'commandline', 'command_line', 'shell_command', 'shell', 'script'];
 
@@ -88,6 +91,9 @@ function paramAliases(tool: string, param: string): string[] {
       if (param === 'find') return ['old_content', 'old_text', 'old_string', 'old', 'search', 'original', 'needle', 'target_text'];
       if (param === 'replace') return ['new_content', 'new_text', 'new_string', 'new', 'replacement', 'updated', 'replace_with'];
       if (param === 'replaceAll') return ['replace_all', 'all'];
+      break;
+    case 'append_file':
+      if (param === 'content') return ['text', 'body', 'addition'];
       break;
     case 'write_file':
     case 'read_file':
@@ -158,7 +164,7 @@ export function validateToolArgs(tool: string, args: Record<string, any>): strin
     return `Unknown tool "${tool}". Available tools: ${CORE_TOOLS.map((t) => t.name).join(', ')}. Reply again with one of these exact names.`;
   }
   if (args._raw !== undefined) {
-    return `The "args" for ${tool} were not valid JSON and could not be parsed: ${cap(String(args._raw), 200)}. Send args as a JSON object, e.g. {"${def.params[0]?.name ?? 'path'}": "..."}.`;
+    return `The "args" for ${tool} were not valid JSON and could not be parsed: ${cap(String(args._raw), 200)}. The call was NOT executed. No files were changed. Send args as a JSON object, e.g. {"${def.params[0]?.name ?? 'path'}": "..."}.`;
   }
   const missing = def.params.filter((p) => p.required && (args[p.name] === undefined || String(args[p.name] ?? '').trim() === ''));
   if (missing.length) {
@@ -219,9 +225,11 @@ export const CORE_TOOLS: ToolDef[] = [
         `canonical root (absolute): ${rootAbs}`,
         `machine: ${meta?.machineLabel ?? 'the paired companion'}`,
         `platform: ${meta?.platform ?? 'unknown'}`,
+        meta?.projectName ? `selected project: ${meta.projectName}` : '',
         `root state: ${rootState}`,
+        meta?.knownTree ? `known top-level structure (from the IDE, authoritative):\n${meta.knownTree}` : '',
         'All tool paths are relative to this root. If a path you expected is missing, list "." to see what actually exists here.',
-      ];
+      ].filter(Boolean);
       return { output: lines.join('\n') };
     },
   },
@@ -323,7 +331,7 @@ export const CORE_TOOLS: ToolDef[] = [
   },
   {
     name: 'write_file',
-    description: 'Create or overwrite a text file in the workspace. Parent directories are created automatically.',
+    description: 'Create or overwrite a text file in the workspace. Parent directories are created automatically. A unified diff of the change is generated before the write; concurrent modifications made after the diff are refused instead of overwritten.',
     danger: 'safe',
     params: [
       { name: 'path', type: 'string', description: 'File path relative to workspace root', required: true },
@@ -333,8 +341,39 @@ export const CORE_TOOLS: ToolDef[] = [
       const p = canonRelPath(args.path);
       const content = typeof args.content === 'string' ? args.content : String(args.content ?? '');
       ctx.assertEditable?.(p);
-      const r = await ctx.fs.writeFile(p, content);
-      return { output: `Wrote ${p} (${r.bytes} bytes).` };
+      // Milestone 1: preview the diff BEFORE writing (best-effort; mock hosts
+      // and older companions without the endpoint just skip it).
+      let diff: string | undefined;
+      let mtime: string | null = null;
+      if (ctx.fs.diffPreview) {
+        try {
+          const pv = await ctx.fs.diffPreview(p, content);
+          diff = pv.diff ? (pv.truncated ? pv.diff + '\n…[diff truncated]' : pv.diff) : undefined;
+          mtime = pv.currentMtime;
+        } catch (e: any) {
+          if (e?.status === 415 || e?.status === 400) return { output: `Cannot write ${p}: ${summarizeError(e)}`, isError: true };
+          // other preview failures are non-fatal — proceed with a plain write
+        }
+      }
+      try {
+        const r = await ctx.fs.writeFile(p, content, { ifUnmodifiedSince: mtime });
+        const stat = r.created ? 'created' : `updated (+${r.diffAdded ?? '?'} / -${r.diffRemoved ?? '?'} lines)`;
+        return {
+          output: `Wrote ${p} (${r.bytes} bytes). ${stat}`,
+          diff,
+          diffPath: p,
+          changedFile: p,
+        };
+      } catch (e: any) {
+        // Overwrite protection fired: hand the model the CURRENT content so it
+        // re-previews instead of clobbering newer work.
+        const conflict = e?.payload?.conflict;
+        if (conflict || /changed on disk after the diff was previewed/i.test(String(e?.message || e))) {
+          const cur = conflict?.currentContent != null ? conflict.currentContent.slice(0, 2000) : '(content unavailable — re-read the file)';
+          return { output: `CONFLICT: "${p}" changed after your diff was previewed — your write was REFUSED to avoid overwriting newer work. Current content (first 2000 chars):\n${cur}\nRe-read the file, integrate the newer changes, and write again.`, isError: true };
+        }
+        throw e;
+      }
     },
   },
   {
@@ -369,10 +408,123 @@ export const CORE_TOOLS: ToolDef[] = [
         return { output: `Error: "find" appears ${count} times in ${p}. Provide more surrounding context or set replaceAll:true.`, isError: true };
       }
       const next = all ? f.content.split(find).join(replace) : f.content.replace(find, replace);
-      await ctx.fs.writeFile(p, next);
-      return { output: `Edited ${p} (replaced ${all ? count : 1} occurrence(s)).` };
+      // Milestone 1: diff preview BEFORE the edit is applied + overwrite
+      // protection via the file's last-modified time read moments ago.
+      let diff: string | undefined;
+      if (ctx.fs.diffPreview) {
+        try {
+          const pv = await ctx.fs.diffPreview(p, next);
+          diff = pv.diff ? (pv.truncated ? pv.diff + '\n…[diff truncated]' : pv.diff) : undefined;
+        } catch { /* preview is best-effort */ }
+      }
+      try {
+        const r = await ctx.fs.writeFile(p, next, { ifUnmodifiedSince: f.modifiedAt ?? null, returnDiff: true });
+        return {
+          output: `Edited ${p} (replaced ${all ? count : 1} occurrence(s), diff: +${r.diffAdded ?? 0} / -${r.diffRemoved ?? 0} lines).`,
+          diff: diff ?? r.diff,
+          diffPath: p,
+          changedFile: p,
+        };
+      } catch (e: any) {
+        const conflict = e?.payload?.conflict;
+        if (conflict || /changed on disk after the diff was previewed/i.test(String(e?.message || e))) {
+          const cur = conflict?.currentContent != null ? conflict.currentContent.slice(0, 2000) : '(content unavailable — re-read the file)';
+          return { output: `CONFLICT: "${p}" changed after you read it — the edit was REFUSED to avoid overwriting newer work. Current content (first 2000 chars):\n${cur}\nRe-read the file and retry with a snippet from the CURRENT content.`, isError: true };
+        }
+        throw e;
+      }
     },
   },
+  {
+    name: 'append_file',
+    description: 'Append text to a file (created if missing). Use to build large files in sections instead of one huge write_file.',
+    danger: 'safe',
+    params: [
+      { name: 'path', type: 'string', description: 'File path relative to workspace root', required: true, aliases: ['file', 'filename', 'target'] },
+      { name: 'content', type: 'string', description: 'Text to append at the end of the file', required: true, aliases: ['text', 'body', 'addition'] },
+    ],
+    async run(args, ctx) {
+      const p = canonRelPath(args.path);
+      const content = typeof args.content === 'string' ? args.content : String(args.content ?? '');
+      ctx.assertEditable?.(p);
+      let existing = '';
+      try {
+        const f = await ctx.fs.readFile(p);
+        existing = f.content;
+        if (existing && !existing.endsWith('\n') && !content.startsWith('\n')) existing += '\n';
+      } catch (e: any) {
+        const msg = summarizeError(e);
+        if (!/not found|404|ENOENT/i.test(msg)) return { output: `Error reading ${p}: ${msg}`, isError: true };
+        existing = ''; // new file
+      }
+      const next = existing + content;
+      const r = await ctx.fs.writeFile(p, next, { ifUnmodifiedSince: null });
+      return { output: `Appended to ${p} (+${Buffer_is(content)}; ${next.length} bytes total).`, changedFile: p };
+    },
+  },
+  {
+    name: 'propose_task_graph',
+    description: 'Propose the parallel decomposition of the objective as a dependency-ordered task graph. Call ONCE with the complete graph.',
+    danger: 'safe',
+    params: [
+      { name: 'tasks', type: 'object', description: 'Array of 2-6 subtasks: {key, title, stage, prompt, machineId?, dependsOn?, contextFiles?, requirements?}', required: true },
+    ],
+    async run(args, _ctx) {
+      const n = Array.isArray(args?.tasks) ? args.tasks.length : 0;
+      return { output: `Task graph accepted (${n} tasks) — the coordinator validated the graph and is scheduling tasks.` };
+    },
+  },
+  {
+    name: 'workspace_map',
+    description: 'Get a compact map of the project: top-level structure, per-directory file counts, and the package manifest (name/scripts/dependency counts). Use FIRST when orienting in an unfamiliar repo instead of listing everything.',
+    danger: 'safe',
+    params: [
+      { name: 'path', type: 'string', description: 'Subdirectory to map (default: workspace root)', required: false },
+    ],
+    async run(args, ctx) {
+      const base = canonRelPath(args.path || '.');
+      const listed = await ctx.fs.listDir(base);
+      const entries = (listed ?? []) as { path: string; type: string; size?: number }[];
+      const dirs = new Map<string, number>();
+      const topFiles: string[] = [];
+      let total = 0;
+      for (const e of entries) {
+        total++;
+        const rel = String(e.path);
+        const slash = rel.indexOf('/');
+        if (slash === -1) {
+          if (e.type === 'dir') dirs.set(rel, dirs.get(rel) ?? 0);
+          else topFiles.push(rel);
+        } else {
+          const d = rel.slice(0, slash);
+          dirs.set(d, (dirs.get(d) ?? 0) + 1);
+        }
+      }
+      const lines = [
+        `Workspace map (${base}) — ${total} entries, ${dirs.size} top-level dirs, ${topFiles.length} root files.`,
+        dirs.size ? `Dirs: ${[...dirs.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15).map(([d, n]) => `${d}/ (${n})`).join(', ')}` : '',
+        topFiles.length ? `Root files: ${topFiles.slice(0, 15).join(', ')}` : '',
+      ].filter(Boolean);
+      // manifest awareness (best-effort)
+      for (const mf of ['package.json', 'Cargo.toml', 'go.mod', 'pyproject.toml', 'requirements.txt']) {
+        try {
+          const f = await ctx.fs.readFile(mf);
+          if (mf === 'package.json') {
+            try {
+              const j = JSON.parse(f.content);
+              lines.push(`package.json: name=${j.name ?? '?'} scripts=[${Object.keys(j.scripts ?? {}).slice(0, 8).join(', ')}] deps=${Object.keys(j.dependencies ?? {}).length} devDeps=${Object.keys(j.devDependencies ?? {}).length}`);
+            } catch { lines.push(`package.json present (unparseable preview: ${f.content.slice(0, 80)})`); }
+          } else {
+            lines.push(`${mf} present (${f.content.split('\n').length} lines)`);
+          }
+          break;
+        } catch { /* manifest not present */ }
+      }
+      lines.push('Use list_dir/read_file/search_project for the specific areas you change next.');
+      return { output: lines.join('\n') };
+    },
+  },
+
   {
     name: 'create_dir',
     description: 'Create a directory (and parents) in the workspace.',
@@ -667,6 +819,146 @@ export const CORE_TOOLS: ToolDef[] = [
       if (!ctx.browser) return { output: 'Error: browser tools are not available in this context.', isError: true };
       const r = await ctx.browser.close();
       return { output: r.note ?? 'Browser session closed.' };
+    },
+  },
+  // ---- Milestone 3: durable project memory tools ----
+  {
+    name: 'memory_search',
+    description: 'Search the workspace\'s durable project memory (decisions, conventions, known bugs, outcomes, preferences) plus the indexed source files. Use at task start to recall prior project knowledge, and before redoing work.',
+    danger: 'safe',
+    params: [
+      { name: 'query', type: 'string', description: 'Keyword search query', required: true, aliases: ['q'] },
+      { name: 'kind', type: 'string', description: 'Optional filter: decision | convention | bug | fact | outcome | test-history | preference | note' },
+      { name: 'limit', type: 'number', description: 'Max results (default 8)' },
+    ],
+    async run(args, ctx) {
+      if (!ctx.memory) return { output: 'Error: project memory is not available in this context (older companion or mock host).', isError: true };
+      const q = String(args.query ?? args.q ?? '');
+      if (!q) return { output: 'Error: memory_search needs a query.', isError: true };
+      const r = await ctx.memory.search(q, { kind: args.kind ? String(args.kind) : undefined, limit: Number(args.limit) || 8 });
+      if (!r.results.length) return { output: `No project memories match "${q}". You can record new knowledge with memory_write.` };
+      const lines = r.results.map((m) => `[${m.kind}]#${m.id.slice(0, 8)} (${m.score != null ? `score ${m.score}, ` : ''}updated ${new Date(m.updatedAt).toISOString().slice(0, 10)})${m.tags?.length ? ` tags:${m.tags.join(',')}` : ''}\n  ${m.content.slice(0, 400)}`);
+      return { output: cap(`${r.results.length} memory hit(s)${r.hybrid ? ' (hybrid keyword+embedding)' : ''}:\n${lines.join('\n')}`, 16000) };
+    },
+  },
+  {
+    name: 'memory_read',
+    description: 'Read one full project memory record by its id (as returned by memory_search).',
+    danger: 'safe',
+    params: [{ name: 'id', type: 'string', description: 'Memory record id (full id or the 8-char prefix shown by memory_search)', required: true }],
+    async run(args, ctx) {
+      if (!ctx.memory) return { output: 'Error: project memory is not available in this context.', isError: true };
+      const wanted = String(args.id ?? '');
+      try {
+        const m = await ctx.memory.read(wanted);
+        return { output: `[${m.kind}] ${m.content}${m.refs ? `\nrefs: ${m.refs}` : ''}` };
+      } catch (e: any) {
+        // allow the 8-char prefix form: resolve via a fresh search
+        if (wanted.length === 8) {
+          const r = await ctx.memory.search(wanted, { limit: 20 }).catch(() => null);
+          const hit = r?.results.find((x) => x.id.startsWith(wanted));
+          if (hit) return { output: `[${hit.kind}] ${hit.content}` };
+        }
+        return { output: `Error reading memory ${wanted}: ${summarizeError(e)}`, isError: true };
+      }
+    },
+  },
+  {
+    name: 'memory_write',
+    description: 'Record durable project knowledge for future agents: architecture/design decisions, coding conventions, discovered bugs and fixes, important facts, task outcomes, verified test history. Duplicate content is merged automatically — write freely.',
+    danger: 'safe',
+    params: [
+      { name: 'kind', type: 'string', description: 'decision | convention | bug | fact | outcome | test-history | preference | note', required: true },
+      { name: 'content', type: 'string', description: 'The knowledge to persist — concrete and self-contained (a future agent reads it without this conversation)', required: true },
+      { name: 'tags', type: 'string', description: 'Comma-separated short tags, e.g. "storage,architecture"' },
+      { name: 'refs', type: 'string', description: 'Related file paths or ids' },
+    ],
+    async run(args, ctx) {
+      if (!ctx.memory) return { output: 'Error: project memory is not available in this context.', isError: true };
+      const kind = String(args.kind ?? 'note');
+      const content = String(args.content ?? '');
+      if (!content.trim()) return { output: 'Error: memory_write needs non-empty content.', isError: true };
+      const tags = typeof args.tags === 'string' && args.tags.trim() ? args.tags.split(',').map((t: string) => t.trim()).filter(Boolean) : undefined;
+      const r = await ctx.memory.write(kind, content, { tags, refs: args.refs ? String(args.refs) : undefined });
+      return { output: r.deduplicated
+        ? `Memory already known — existing record merged/updated (id ${r.id}).`
+        : `Memory recorded (id ${r.id}). Future agents will find it via memory_search.` };
+    },
+  },
+  {
+    name: 'notebook_append',
+    description: 'Append an entry to the shared agent notebook (append-only; visible to all agents on this workspace): kind = finding | handoff | decision | issue.',
+    danger: 'safe',
+    params: [
+      { name: 'kind', type: 'string', description: 'finding | handoff | decision | issue', required: true },
+      { name: 'content', type: 'string', description: 'The entry text', required: true },
+      { name: 'refs', type: 'string', description: 'Optional related file paths or assignment ids' },
+    ],
+    async run(args, ctx) {
+      if (!ctx.memory) return { output: 'Error: notebook is not available in this context.', isError: true };
+      const agentId = ctx.workspaceMeta?.machineLabel ? `agent@${ctx.workspaceMeta.machineLabel}` : 'agent';
+      const r = await ctx.memory.notebookAppend(String(args.kind ?? 'finding'), String(args.content ?? ''), { refs: args.refs ? String(args.refs) : undefined });
+      return { output: `Notebook entry appended (seq ${r.seq ?? '?'}).` };
+    },
+  },
+  {
+    name: 'notebook_search',
+    description: 'Search the shared agent notebook (findings, handoffs, decisions, issues from other agents).',
+    danger: 'safe',
+    params: [
+      { name: 'query', type: 'string', description: 'Keyword filter', required: true, aliases: ['q'] },
+      { name: 'kind', type: 'string', description: 'Optional kind filter' },
+      { name: 'limit', type: 'number', description: 'Max entries (default 20)' },
+    ],
+    async run(args, ctx) {
+      if (!ctx.memory) return { output: 'Error: notebook is not available in this context.', isError: true };
+      const r = await ctx.memory.notebookSearch(String(args.query ?? args.q ?? ''), { kind: args.kind ? String(args.kind) : undefined, limit: Number(args.limit) || 20 });
+      if (!r.results.length) return { output: 'No notebook entries match.' };
+      const lines = r.results.map((e) => `#${e.seq ?? '?'} [${e.kind}] ${e.agentId}: ${e.content.slice(0, 240)}${e.refs ? ` (refs: ${e.refs})` : ''}`);
+      return { output: cap(lines.join('\n'), 16000) };
+    },
+  },
+  {
+    name: 'read_scratchpad',
+    description: 'Read an agent scratchpad (private working state: objective, plan, findings, errors, pending) by agent id. Use your own agentId from the task assignment, or read another agent\'s to coordinate.',
+    danger: 'safe',
+    params: [{ name: 'agentId', type: 'string', description: 'Agent id whose scratchpad to read', required: true }],
+    async run(args, ctx) {
+      if (!ctx.memory) return { output: 'Error: scratchpad is not available in this context.', isError: true };
+      const s = await ctx.memory.readScratchpad(String(args.agentId ?? ''));
+      const parts: string[] = [];
+      if (s.objective) parts.push(`objective: ${String(s.objective).slice(0, 300)}`);
+      if (s.progress) parts.push(`progress: ${String(s.progress).slice(0, 200)}`);
+      for (const key of ['plan', 'findings', 'toolResults', 'errors', 'pending']) {
+        if (Array.isArray(s[key]) && s[key].length) parts.push(`${key}: ${s[key].slice(0, 8).map((x: unknown) => String(x).slice(0, 160)).join(' | ')}`);
+      }
+      return { output: parts.length ? parts.join('\n') : '(empty scratchpad)' };
+    },
+  },
+  {
+    name: 'write_scratchpad',
+    description: 'Update your scratchpad (private working state persisted across turns): objective, progress, plan, findings, toolResults, errors, pending. Merge-safe: only provided fields change.',
+    danger: 'safe',
+    params: [
+      { name: 'agentId', type: 'string', description: 'Your agent id', required: true },
+      { name: 'objective', type: 'string', description: 'What this agent is trying to do' },
+      { name: 'progress', type: 'string', description: 'Short current status' },
+      { name: 'plan', type: 'string', description: 'JSON array of plan steps' },
+      { name: 'findings', type: 'string', description: 'JSON array of discovered facts' },
+      { name: 'errors', type: 'string', description: 'JSON array of errors seen (with context)' },
+      { name: 'pending', type: 'string', description: 'JSON array of remaining steps' },
+    ],
+    async run(args, ctx) {
+      if (!ctx.memory) return { output: 'Error: scratchpad is not available in this context.', isError: true };
+      const patch: Record<string, unknown> = {};
+      for (const k of ['objective', 'progress']) if (args[k] !== undefined) patch[k] = String(args[k]);
+      for (const k of ['plan', 'findings', 'toolResults', 'errors', 'pending']) {
+        if (args[k] !== undefined) {
+          try { patch[k] = JSON.parse(String(args[k])); } catch { patch[k] = [String(args[k])]; }
+        }
+      }
+      const s = await ctx.memory.writeScratchpad(String(args.agentId ?? 'agent'), patch);
+      return { output: `Scratchpad updated (progress: ${String((s as any)?.progress ?? 'n/a').slice(0, 80)}).` };
     },
   },
   {

@@ -28,11 +28,11 @@ import { genAssignmentId } from '@/lib/store/mesh';
 export type StageId = 'planner' | 'coder' | 'tester' | 'reviewer' | 'debugger';
 
 const STAGE_TOOLS: Record<StageId, string[]> = {
-  planner: ['finish'],
-  coder: ['list_dir', 'read_file', 'write_file', 'append_file', 'edit_file', 'create_dir', 'search_project', 'run_command', 'launch_app', 'process_status', 'stop_process', 'install_dependencies', 'run_build', 'run_tests', 'finish'],
-  tester: ['list_dir', 'read_file', 'write_file', 'append_file', 'edit_file', 'search_project', 'run_command', 'launch_app', 'process_status', 'stop_process', 'install_dependencies', 'run_tests', 'run_build', 'finish'],
-  reviewer: ['list_dir', 'read_file', 'search_project', 'finish'],
-  debugger: ['list_dir', 'read_file', 'edit_file', 'append_file', 'search_project', 'run_command', 'run_tests', 'run_build', 'process_status', 'stop_process', 'finish'],
+  planner: ['memory_search', 'memory_write', 'notebook_search', 'notebook_append', 'finish'],
+  coder: ['list_dir', 'read_file', 'write_file', 'append_file', 'edit_file', 'create_dir', 'search_project', 'run_command', 'launch_app', 'process_status', 'stop_process', 'install_dependencies', 'run_build', 'run_tests', 'memory_search', 'memory_write', 'notebook_append', 'notebook_search', 'read_scratchpad', 'write_scratchpad', 'finish'],
+  tester: ['list_dir', 'read_file', 'write_file', 'append_file', 'edit_file', 'search_project', 'run_command', 'launch_app', 'process_status', 'stop_process', 'install_dependencies', 'run_tests', 'run_build', 'memory_search', 'memory_write', 'notebook_append', 'notebook_search', 'finish'],
+  reviewer: ['list_dir', 'read_file', 'search_project', 'memory_search', 'notebook_search', 'finish'],
+  debugger: ['list_dir', 'read_file', 'edit_file', 'append_file', 'search_project', 'run_command', 'run_tests', 'run_build', 'process_status', 'stop_process', 'memory_search', 'memory_write', 'notebook_append', 'finish'],
 };
 
 export interface AgentTarget {
@@ -243,7 +243,7 @@ export class Coordinator {
     if (this.stopRequested) {
       assignment.status = 'cancelled';
       await this.persistAssignment(assignment);
-      return { r: { content: '', turns: 0, messages: [], hitTurnLimit: false, paused: true, note: 'Stopped by user before start.' } as RunResult, assignment, conflict: null };
+      return { r: { content: '', turns: 0, messages: [], hitTurnLimit: false, paused: true, note: 'Stopped by user before start.', filesChanged: [] } as RunResult, assignment, conflict: null };
     }
     const events: AgentEvent[] = [];
     const runner = new AgentRunner({
@@ -389,8 +389,9 @@ export class Coordinator {
    * on the SAME machine/model with its own protocol and a fresh allowance,
    * seeded with the prior summary so completed work is not redone.
    */
-  async continueStage(stage: StageId): Promise<{ summary: string; turns: number; assignment: AgentAssignment } | null> {
-    const prior = this.lastRunResults.find((r) => r.stage === stage);
+  async continueStage(stage: StageId, currentResults?: CoordinatorReport['results']): Promise<{ summary: string; turns: number; assignment: AgentAssignment } | null> {
+    const pool = currentResults && currentResults.length ? currentResults : this.lastRunResults;
+    const prior = pool.find((r) => r.stage === stage);
     if (!prior) return null;
     const target = this.cfg.machines.find((m) => m.machineName === prior.machine && m.model === prior.model)
       ?? this.cfg.machines[0];
@@ -405,7 +406,9 @@ export class Coordinator {
       ``,
       `Continue from the current workspace state. Do not redo verified work.`,
     ].filter(Boolean).join('\n');
-    const { r, assignment } = await this.runAgent(stage === 'coder' ? 'debugger' : stage, target, task, []);
+    // Continuation preserves the ORIGINAL stage target (same machine, model,
+    // tool protocol) — the debugger-role remap is only for repair reassignment.
+    const { r, assignment } = await this.runAgent(stage, target, task, []);
     return { summary: r.content || r.note || '(no summary returned)', turns: r.turns, assignment };
   }
 
@@ -435,6 +438,8 @@ export class Coordinator {
       ``,
       `Continue from the current workspace state. Verify what exists before changing it.`,
     ].filter(Boolean).join('\n');
+    // Reassignment remaps a failed coder to the DEBUGGER role (repair
+    // semantics) with the replacement's own target/protocol/turns.
     const { r, assignment } = await this.runAgent(stage === 'coder' ? 'debugger' : stage, target, task, []);
     return { summary: r.content || r.note || '(no summary returned)', turns: r.turns, assignment };
   }
@@ -468,7 +473,11 @@ export class Coordinator {
       coderSummary = coderRun.r.content || coderRun.r.note || '(no summary returned)';
       results.push({ stage: 'coder', assignmentId: coderRun.assignment.id, agentId: coderRun.assignment.agentId, machine: coderAssign.target.machineName, model: coderAssign.target.model, summary: coderSummary, turns: coderRun.r.turns, conflict: coderRun.conflict, escalated: false, hitTurnLimit: coderRun.r.hitTurnLimit });
       if (coderRun.conflict) conflicts.push(coderRun.conflict);
-      if (coderRun.r.paused) return this.report(results, 'UNKNOWN', reworkUsed, totalTurns, conflicts, 'paused');
+      // Turn limit ≠ user pause: the pipeline still proceeds to verification
+      // with the partial progress recorded honestly (the user can resume the
+      // stage explicitly via continueStage — the recorded summary explains
+      // exactly where it stopped). A user pause (no hitTurnLimit) stops the run.
+      if (coderRun.r.paused && !coderRun.r.hitTurnLimit) return this.report(results, 'UNKNOWN', reworkUsed, totalTurns, conflicts, 'paused');
 
       // 3. TESTER (may run on a different machine — e.g. the GPU worker)
       const testerAssign = await this.assignStage('tester', explicitTargets?.tester);
@@ -477,7 +486,7 @@ export class Coordinator {
       testReport = testerRun.r.content || testerRun.r.note || '(no summary returned)';
       results.push({ stage: 'tester', assignmentId: testerRun.assignment.id, agentId: testerRun.assignment.agentId, machine: testerAssign.target.machineName, model: testerAssign.target.model, summary: testReport, turns: testerRun.r.turns, conflict: testerRun.conflict, escalated: false, hitTurnLimit: testerRun.r.hitTurnLimit });
       if (testerRun.conflict) conflicts.push(testerRun.conflict);
-      if (testerRun.r.paused) return this.report(results, 'UNKNOWN', reworkUsed, totalTurns, conflicts, 'paused');
+      if (testerRun.r.paused && !testerRun.r.hitTurnLimit) return this.report(results, 'UNKNOWN', reworkUsed, totalTurns, conflicts, 'paused');
 
       // 4. REVIEWER (+ escalation-aware rework)
       const reviewerAssign = await this.assignStage('reviewer', explicitTargets?.reviewer);

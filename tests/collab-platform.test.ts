@@ -134,13 +134,13 @@ beforeAll(async () => {
   peerC = cc.json.peer.id;
 
   settings.useSettings.setState((s: any) => ({ companion: { ...s.companion, mode: 'direct', directUrl: BASE_A, token: tokenA } }));
-});
+}, 60000);
 
-afterAll(async () => {
+afterAll(async () => { /* hook timeout raised: companion shutdown + rm can exceed bun's 5s default */
   for (const p of [...companions, ...stubs]) { try { p.kill('SIGTERM'); } catch { /* ignore */ } }
   await new Promise((r) => setTimeout(r, 300));
   for (const d of [HOME_A, HOME_B, HOME_C, WS_B]) await fsp.rm(d, { recursive: true, force: true }).catch(() => {});
-});
+}, 20000);
 
 function makeConfig(overrides: Partial<Record<'planner' | 'coder' | 'tester', Partial<import('../src/lib/agent/collab-service').CollabParticipant>>> = {}) {
   const participants = [

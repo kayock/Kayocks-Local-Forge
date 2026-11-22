@@ -10,6 +10,11 @@ export interface ToolMeta {
   durMs?: number;
   summary?: string;
   argsPreview?: string;
+  // Milestone 1: structured write/edit results (UI display only)
+  diff?: string;
+  diffPath?: string;
+  changedFile?: string;
+  workspaceRevision?: string;
 }
 
 export interface ChatMessageView {

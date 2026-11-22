@@ -1,4 +1,6 @@
 // Explicitly paired LAN peers. No implicit broad network scans, no public/WAN routing.
+// Milestone 2: mDNS advertisement/browsing lives in discovery.js — pairing is
+// still manual, user-approved, and code-confirmed.
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -7,6 +9,8 @@ import net from 'node:net';
 import crypto from 'node:crypto';
 import { config, getState, saveState } from './config.js';
 import { hardwareInventory } from './platform.js';
+import * as tasks from './tasks.js';
+import { discoveryStatus } from './discovery.js';
 
 function bad(message, status = 400) { const e = new Error(message); e.status = status; throw e; }
 function peers() { const s = getState(); if (!s.meshPeers) s.meshPeers = []; return s.meshPeers; }
@@ -62,7 +66,14 @@ async function healthAt(url) {
 }
 export function meshStatus() {
   const credential = readCredentials();
-  return { instanceId: localInstanceId(), peers: peers().map(({ id, name, url, platform, version, buildId, addedAt, lastSeenAt, lastStatus }) => ({ id, name, url, platform, version, buildId, addedAt, lastSeenAt, lastStatus, paired: !!credential[id] })), discovered: [] };
+  let discovery = null;
+  try { discovery = discoveryStatus(); } catch { /* discovery module unavailable */ }
+  return {
+    instanceId: localInstanceId(),
+    peers: peers().map(({ id, name, url, platform, version, buildId, addedAt, lastSeenAt, lastStatus }) => ({ id, name, url, platform, version, buildId, addedAt, lastSeenAt, lastStatus, paired: !!credential[id] })),
+    discovered: discovery?.discovered || [],
+    discovery: discovery ? { available: discovery.available, enabled: discovery.enabled, advertising: discovery.self?.advertising, reason: discovery.reason, self: discovery.self } : { available: false, enabled: false, reason: 'discovery module unavailable' },
+  };
 }
 function localInstanceId() {
   const s = getState();
@@ -115,12 +126,30 @@ export async function peerStatus(id) {
     }
     p.lastStatus = credential ? (hardware ? 'ready' : 'paired-api-unavailable') : 'unpaired';
   } catch { p.lastStatus = 'unreachable'; }
-  if (reachable) p.lastSeenAt = Date.now(); saveState();
+  if (reachable) p.lastSeenAt = Date.now();
+  else {
+    // Milestone 2 — graceful recovery: a disconnected machine cannot silently
+    // keep active tasks. Its active task packets are marked failed so the
+    // coordinator can reassign them explicitly (never auto-retried).
+    for (const ws of getState().workspaces || []) {
+      try { tasks.failActiveTasksForMachine(ws.id, p.id, `peer ${p.name} unreachable (${p.lastStatus})`); } catch { /* ignore */ }
+    }
+  }
+  saveState();
   return { peer: { ...p, paired: !!credential }, reachable, health, hardware };
 }
-const proxied = /^\/api\/(?:hardware|models(?:\/(?:dirs|load|unload|external|profiles(?:\/[\w.-]+)?|status\/[\w.:-]+|diagnostics\/[\w.:-]+|output\/[\w.:-]+))?|network(?:\/test)?|agents\/[\w-]+\/(?:scratchpad\/[\w.:-]+|notebook|assignments)|ws\/[\w-]+\/revision)$/;
+// Milestone 2: the proxy carries the full workspace tool surface a remote
+// agent needs (fs, exec, browser, revisions, locks, task packets) plus the
+// Phase-2 inventory/memory routes. /term and /pty streaming channels are NOT
+// proxied (buffered JSON only) — agents use /exec.
+const proxied = /^\/api\/(?:hardware|models(?:\/(?:dirs|load|unload|external|profiles(?:\/[\w.-]+)?|status\/[\w.:-]+|diagnostics\/[\w.:-]+|output\/[\w.:-]+))?|network(?:\/test)?|mesh\/discover|agents\/[\w-]+\/(?:scratchpad\/[\w.:-]+|notebook|assignments)|ws\/[\w-]+(?:\/(?:tree|file(?:\/append)?|mkdir|delete|rename|stat|search|exec|term(?:\/signal)?|proc\/(?:start|list|output|stop)|browser\/(?:open|navigate|eval|screenshot|verify|close|status)|diff\/preview|revision|locks|tasks(?:\/[\w-]+(?:\/(?:ack|progress|complete|fail|cancel))?)?|memory(?:\/(?:search|files|index|stats|export|import|[\w-]{8,64}))?))?|memory\/capabilities)?$/;
+// Bare routes the routed IDE client needs: model chat and health probes
+// arrive as 'health' / 'chat' (no /api prefix) depending on the caller.
+const proxiedBare = /^\/(?:api\/)?(?:health|chat)$/;
 export async function proxyPeer(id, req, relativePath, query) {
-  if (!proxied.test(relativePath) || relativePath.includes('..') || relativePath.includes('%')) bad('This route is not available through mesh proxy', 403);
+  const rel = relativePath.startsWith('/') ? relativePath : `/${relativePath}`;
+  if ((!proxied.test(rel) && !proxiedBare.test(rel)) || rel.includes('..') || rel.includes('%')) bad('This route is not available through mesh proxy', 403);
+  relativePath = rel;
   const peer = peerById(id); const token = readCredentials()[id];
   if (!token) bad('Peer is not paired', 401);
   await normalizePeerUrl(peer.url);
@@ -137,8 +166,11 @@ export async function proxyPeer(id, req, relativePath, query) {
     body = Buffer.concat(chunks).toString('utf8');
   }
   const ctrl = new AbortController();
-  // Model loading can legitimately take many minutes on local hardware.
-  const timeout = relativePath === '/api/models/load' ? 30 * 60_000 : 60000;
+  // Model loading can legitimately take many minutes on local hardware;
+  // workspace exec mirrors the companion's own command timeout ceiling.
+  const timeout = relativePath === '/api/models/load' ? 30 * 60_000
+    : /\/api\/ws\/[\w-]+\/(?:exec|term)/.test(relativePath) ? 600_000
+    : 60000;
   const timer = setTimeout(() => ctrl.abort(), timeout);
   try {
     const response = await fetch(`${peer.url}${relativePath}${query}`, {

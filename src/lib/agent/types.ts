@@ -49,12 +49,18 @@ export interface ToolContext {
   };
   fs: {
     listDir: (path?: string) => Promise<{ path: string; type: 'dir' | 'file'; size?: number }[]>;
-    readFile: (path: string) => Promise<{ content: string; size: number }>;
-    writeFile: (path: string, content: string) => Promise<{ bytes: number }>;
+    readFile: (path: string) => Promise<{ content: string; size: number; modifiedAt?: string }>;
+    // opts (Milestone 1): ifUnmodifiedSince implements overwrite protection —
+    // the companion refuses with 409 + current content when the file changed
+    // after the preview; returnDiff asks for a concise post-edit diff.
+    writeFile: (path: string, content: string, opts?: { ifUnmodifiedSince?: string | null; returnDiff?: boolean }) => Promise<{ bytes: number; created?: boolean; modifiedAt?: string; diff?: string; diffAdded?: number; diffRemoved?: number; changedFile?: { path: string; size: number; mtimeMs: number } }>;
     mkdir: (path: string) => Promise<void>;
     deletePath: (path: string) => Promise<void>; // pre-approved by the time a tool runs
     rename: (from: string, to: string) => Promise<void>;
     search: (q: string, opts?: { isRegex?: boolean; glob?: string }) => Promise<{ path: string; line: number; text: string }[]>;
+    // Milestone 1: unified diff preview BEFORE a write is approved. Optional
+    // so mock hosts and older companions degrade to plain writes.
+    diffPreview?: (path: string, content: string) => Promise<{ path: string; exists: boolean; diff: string; added: number; removed: number; truncated: boolean; currentMtime: string | null; previewedBytes: number }>;
     // Forge upgrade — Problem B: distinguish empty from missing. Optional so
     // mock hosts and older companions degrade gracefully.
     stat?: (path: string) => Promise<{ exists: boolean; type?: 'dir' | 'file' | 'other'; empty?: boolean; entryCount?: number; parentExists?: boolean; reason?: string; size?: number }>;
@@ -85,12 +91,32 @@ export interface ToolContext {
     rootPath: string;     // absolute path on the executing machine
     machineLabel: string; // e.g. "This computer", "Station", "Portable", "Windows Dell"
     platform: string;
+    projectName?: string;
+    knownTree?: string;
+  };
+  // Milestone 3: durable project memory + shared coordination surfaces.
+  // Optional so mock hosts and older companions degrade with clear messages.
+  memory?: {
+    search: (q: string, opts?: { kind?: string; limit?: number }) => Promise<{ query: string; results: { id: string; kind: string; content: string; tags: string[]; score?: number; updatedAt: number; refs?: string | null }[]; hybrid?: boolean }>;
+    read: (id: string) => Promise<{ id: string; kind: string; content: string; tags: string[]; refs?: string | null; updatedAt: number }>;
+    write: (kind: string, content: string, opts?: { tags?: string[]; refs?: string }) => Promise<{ id: string; deduplicated: boolean }>;
+    notebookAppend: (kind: string, content: string, opts?: { refs?: string }) => Promise<{ id?: string; seq?: number }>;
+    notebookSearch: (q: string, opts?: { kind?: string; limit?: number }) => Promise<{ results: { seq?: number; agentId: string; kind: string; content: string; refs?: string | null; at: number }[] }>;
+    readScratchpad: (agentId: string) => Promise<Record<string, unknown>>;
+    writeScratchpad: (agentId: string, patch: Record<string, unknown>) => Promise<Record<string, unknown>>;
   };
 }
 
 export interface ToolResult {
   output: string;
   isError?: boolean;
+  // Milestone 1: unified diff attached by write/edit tools. Rendered in the
+  // UI (tool card + approval card) but NOT fed to the model with the result —
+  // the model gets the concise confirmation line instead.
+  diff?: string;
+  diffPath?: string;
+  // structured result metadata surfaced to the coordinator/diagnostics
+  changedFile?: string;
 }
 
 export interface ToolDef {
@@ -128,13 +154,22 @@ export interface ToolLogEntry {
   outcome?: 'ok-empty' | 'ok-nonempty' | 'error' | 'denied' | 'blocked';
   // Diagnostics detail (Phase 1.5 §6): optional per-call annotations. Present
   // when the runner records them; the diagnostics panel renders '—' otherwise.
-  parse?: 'ok' | 'repair' | 'failed';
+  // Milestone 4 (transport): how the call's arguments arrived — 'object' |
+  // 'clean' | 'repaired' | 'truncated' | 'failed' ('ok'/'repair' kept for the
+  // legacy diagnostics panel labels).
+  parse?: 'ok' | 'repair' | 'failed' | 'object' | 'clean' | 'repaired' | 'truncated';
   validation?: 'ok' | 'schema-invalid' | 'unknown-tool';
   durMs?: number;
   repeatBlocked?: boolean;
   recoveryIssued?: boolean;
   argsTruncated?: boolean;
   argsError?: string;
+  // Milestone 1: unified diff of the change (UI display only), the file it
+  // touches, and the workspace-revision note recorded after FS writes.
+  diff?: string;
+  diffPath?: string;
+  changedFile?: string;
+  workspaceRevision?: string | null;
 }
 
 export type AgentEvent =
@@ -153,11 +188,17 @@ export type AgentEvent =
   | { type: 'auto_steering'; trigger: string; text: string }
   | { type: 'paused'; turn: number; reason?: string; note?: string }
   | { type: 'stall_detected'; tool: string; attempts: number; message: string }
+  // Milestone 4: outcome-aware recovery ladder + honest stalled verdict
+  | { type: 'recovery_action'; action: 'workspace_refocus' | 'strategy_directive'; stallClass: string; step: number; message: string }
+  | { type: 'stalled'; message: string }
   | { type: 'escalation'; fromModel: string; toModel?: string; reason: string }
   // Forge upgrade — Problem D: evidence-gated completion
   | { type: 'completion_gate'; status: CompletionStatus; missing: string[]; detail: string; overridden?: boolean }
   | { type: 'dialect_learned'; dialect: 'native' | 'json' | 'tagged' | 'py'; model: string }
-  | { type: 'usage'; usage: { promptTokens: number | null; completionTokens: number | null } }
+  | { type:'usage'; usage: { promptTokens: number | null; completionTokens: number | null } }
+  // Milestone 1: a file write/edit produced a diff preview (UI renders it;
+  // never fed to the model to keep context lean).
+  | { type: 'diff_preview'; path: string; diff: string; added?: number; removed?: number }
   | { type: 'final'; content: string; turns: number; note?: string; canContinue?: boolean; completion?: CompletionResult }
   | { type: 'stage'; stage: string }
   | { type: 'notice'; message: string };

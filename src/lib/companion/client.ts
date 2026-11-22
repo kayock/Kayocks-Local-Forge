@@ -49,6 +49,28 @@ export class CompanionError extends Error {
   }
 }
 
+// Milestone 3: persistent project memory record
+export interface MemoryRecord {
+  id: string;
+  kind: string;
+  content: string;
+  tags: string[];
+  refs?: string | null;
+  source?: string | null;
+  agentId?: string | null;
+  pinned?: boolean;
+  superseded?: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface MemoryBackup {
+  format: 'localforge-memory-v1';
+  workspaceId: string;
+  exportedAt: string;
+  memories: MemoryRecord[];
+}
+
 type CfgGetter = () => CompanionConfig;
 
 export class CompanionClient {
@@ -98,14 +120,33 @@ export class CompanionClient {
     return json as T;
   }
 
+  // ---- RC3: project rules & skills (.localforge/ in the workspace) ----
+  async getProjectGuidance(workspaceId: string): Promise<{ rules: string | null; skills: { name: string; content: string }[] }> {
+    return this.req('GET', `/api/ws/${workspaceId}/project-guidance`);
+  }
+
+  // ---- RC3: task checkpoints (shadow git on this companion's workspace) ----
+  async createCheckpoint(workspaceId: string, label: string): Promise<{ available: boolean; checkpoint?: { id: string; hash: string; label: string; at: number }; error?: string }> {
+    return this.req('POST', `/api/ws/${workspaceId}/checkpoints`, { label });
+  }
+  async listCheckpoints(workspaceId: string): Promise<{ available: boolean; checkpoints: { id: string; hash: string; label: string; at: number }[] }> {
+    return this.req('GET', `/api/ws/${workspaceId}/checkpoints`);
+  }
+  async checkpointDiff(workspaceId: string, hash: string): Promise<{ available: boolean; files?: string[]; stat?: string; error?: string }> {
+    return this.req('GET', `/api/ws/${workspaceId}/checkpoints/${encodeURIComponent(hash)}/diff`);
+  }
+  async restoreCheckpoint(workspaceId: string, hash: string): Promise<{ available: boolean; restored?: string; removedFiles?: string[]; safetyCheckpoint?: any; error?: string }> {
+    return this.req('POST', `/api/ws/${workspaceId}/checkpoints/${encodeURIComponent(hash)}/restore`, {});
+  }
+
   // ---- pairing / status ----
   async health(): Promise<{
     ok: boolean; name: string; version: string; platform: string; paired: boolean;
     workspaces?: { id: string; name: string; path: string }[];
     resources?: { cpus: number; load1: number; memTotal: number; memFree: number; uptimeSec: number; hostname: string };
   }> {
-    const res = await fetch(this.buildUrl('/health'));
-    if (!res.ok) throw new CompanionError(`Companion health check failed (${res.status})`);
+    const res = await fetch(this.buildUrl('/health'), { headers: this.headers() });
+    if (!res.ok) throw new CompanionError(`Companion health check failed (${res.status}) at ${this.buildUrl('/health')}`);
     return res.json();
   }
 
@@ -142,8 +183,23 @@ export class CompanionClient {
     return this.req<{ path: string; content: string; size: number; modifiedAt: string }>('GET', `/api/ws/${wsId}/file`, undefined, { path });
   }
 
-  writeFile(wsId: string, path: string, content: string) {
-    return this.req<{ path: string; bytes: number }>('PUT', `/api/ws/${wsId}/file`, { path, content });
+  writeFile(wsId: string, path: string, content: string, opts?: { ifUnmodifiedSince?: string | null; returnDiff?: boolean }) {
+    return this.req<{ path: string; bytes: number; modifiedAt?: string; created?: boolean; changedFile?: { path: string; size: number; mtimeMs: number }; diff?: string; diffAdded?: number; diffRemoved?: number; conflictContent?: string }>('PUT', `/api/ws/${wsId}/file`, {
+      path, content, ifUnmodifiedSince: opts?.ifUnmodifiedSince ?? undefined, returnDiff: opts?.returnDiff === true,
+    });
+  }
+
+  // Milestone 1: unified diff BEFORE a write is approved. Read-only; the
+  // returned currentMtime is echoed back on writeFile to prevent clobbering
+  // concurrent modifications (409 conflict with the on-disk content).
+  diffPreview(wsId: string, path: string, content: string) {
+    return this.req<{ path: string; exists: boolean; diff: string; added: number; removed: number; truncated: boolean; currentMtime: string | null; previewedBytes: number }>('POST', `/api/ws/${wsId}/diff/preview`, { path, content });
+  }
+
+  // Milestone 1: complete output of a recently executed command (tool results
+  // are truncated for the model; the human opens the full log here).
+  execLog(wsId: string, id: string) {
+    return this.req<{ id: string; cmd: string; exitCode: number | null; timedOut: boolean; durMs: number; createdAt: string; stdout: string; stderr: string; truncated: boolean }>('GET', `/api/ws/${wsId}/exec/log`, undefined, { id });
   }
 
   mkdir(wsId: string, path: string) {
@@ -247,6 +303,121 @@ export class CompanionClient {
 
   signalTerm(wsId: string, sessionId: string) {
     return this.req('POST', `/api/ws/${wsId}/term/signal`, { sessionId });
+  }
+
+  // ---- Milestone 3: persistent project memory (same base URL as /api/ws) ----
+  memoryList(wsId: string, opts?: { kind?: string; limit?: number }) {
+    const q: Record<string, string> = {};
+    if (opts?.kind) q.kind = opts.kind;
+    if (opts?.limit) q.limit = String(opts.limit);
+    return this.req<{ memories: MemoryRecord[]; backend?: string }>('GET', `/api/ws/${wsId}/memory`, undefined, q);
+  }
+
+  memorySearch(wsId: string, q: string, opts?: { kind?: string; limit?: number }) {
+    const query: Record<string, string> = { q };
+    if (opts?.kind) query.kind = opts.kind;
+    if (opts?.limit) query.limit = String(opts.limit);
+    return this.req<{ query: string; backend?: string; hybrid?: boolean; results: (MemoryRecord & { score: number })[] }>('GET', `/api/ws/${wsId}/memory/search`, undefined, query);
+  }
+
+  memoryRead(wsId: string, id: string) {
+    return this.req<MemoryRecord>('GET', `/api/ws/${wsId}/memory/${id}`);
+  }
+
+  memoryWrite(wsId: string, body: { kind: string; content: string; tags?: string[]; refs?: string; agentId?: string; pinned?: boolean }) {
+    return this.req<{ id: string; deduplicated: boolean; createdAt: number; updatedAt: number }>('POST', `/api/ws/${wsId}/memory`, body);
+  }
+
+  memoryUpdate(wsId: string, id: string, patch: { kind?: string; content?: string; tags?: string[]; refs?: string; pinned?: boolean }) {
+    return this.req<{ id: string; updated: boolean }>('PUT', `/api/ws/${wsId}/memory/${id}`, patch);
+  }
+
+  memoryDelete(wsId: string, id: string) {
+    return this.req<{ deleted: boolean }>('DELETE', `/api/ws/${wsId}/memory/${id}`);
+  }
+
+  memoryIndex(wsId: string, full = false) {
+    return this.req<{ indexed: number; unchanged: number; skippedSecrets: number; note?: string }>('POST', `/api/ws/${wsId}/memory/index`, { full });
+  }
+
+  memoryStats(wsId: string) {
+    return this.req<{ backend: string; memories: number; pinned: number; byKind: { kind: string; n: number }[]; indexedFiles: number; lastIndexedAt: number | null }>('GET', `/api/ws/${wsId}/memory/stats`);
+  }
+
+  memoryFileSearch(wsId: string, q: string) {
+    return this.req<{ query: string; results: { path: string; snippet: string }[] }>('GET', `/api/ws/${wsId}/memory/files`, undefined, { q });
+  }
+
+  memoryExport(wsId: string) {
+    return this.req<MemoryBackup>('GET', `/api/ws/${wsId}/memory/export`);
+  }
+
+  memoryImport(wsId: string, backup: MemoryBackup, replace = false) {
+    return this.req<{ restored: number; deduplicated: number; replaced: boolean }>('POST', `/api/ws/${wsId}/memory/import`, { ...backup, replace });
+  }
+
+  // ---- agent coordination surfaces (scratchpad/notebook) ----
+  readScratchpad(wsId: string, agentId: string) {
+    return this.req<any>('GET', `/api/agents/${wsId}/scratchpad/${agentId}`);
+  }
+
+  writeScratchpad(wsId: string, agentId: string, patch: Record<string, unknown>) {
+    return this.req<any>('PUT', `/api/agents/${wsId}/scratchpad/${agentId}`, patch);
+  }
+
+  notebookAppend(wsId: string, entry: { agentId: string; kind: string; content: string; refs?: string }) {
+    return this.req<any>('POST', `/api/agents/${wsId}/notebook`, entry);
+  }
+
+  notebookList(wsId: string, opts?: { since?: number; agent?: string; kind?: string }) {
+    const q: Record<string, string> = {};
+    if (opts?.since !== undefined) q.since = String(opts.since);
+    if (opts?.agent) q.agent = opts.agent;
+    if (opts?.kind) q.kind = opts.kind;
+    return this.req<{ entries: any[] }>('GET', `/api/agents/${wsId}/notebook`, undefined, q);
+  }
+
+  // ---- real PTY terminal (Milestone 1) ----
+  // Persistent interactive shell sessions. When the companion lacks node-pty,
+  // ptyCapabilities() reports it and the terminal panel falls back to the
+  // legacy NDJSON streaming shell.
+  ptyCapabilities() {
+    return this.req<{ available: boolean; backend: 'node-pty' | 'unavailable'; reason?: string; fallback: string }>('GET', '/api/pty/capabilities');
+  }
+
+  ptyStart(wsId: string, opts?: { cols?: number; rows?: number; cwd?: string; shell?: string }) {
+    return this.req<{ sessionId: string; shell: string; cwd: string; cols: number; rows: number; backend: string }>('POST', `/api/ws/${wsId}/pty/start`, {
+      cols: opts?.cols, rows: opts?.rows, cwd: opts?.cwd, shell: opts?.shell,
+    });
+  }
+
+  ptyInput(wsId: string, sessionId: string, data: string) {
+    return this.req<{ ok: boolean }>('POST', `/api/ws/${wsId}/pty/input`, { sessionId, data });
+  }
+
+  ptyResize(wsId: string, sessionId: string, cols: number, rows: number) {
+    return this.req<{ ok: boolean }>('POST', `/api/ws/${wsId}/pty/resize`, { sessionId, cols, rows });
+  }
+
+  ptySignal(wsId: string, sessionId: string, signal: string) {
+    return this.req<{ ok: boolean }>('POST', `/api/ws/${wsId}/pty/signal`, { sessionId, signal });
+  }
+
+  ptyStop(wsId: string, sessionId: string) {
+    return this.req<{ stopped: boolean }>('POST', `/api/ws/${wsId}/pty/stop`, { sessionId });
+  }
+
+  ptyList(wsId: string) {
+    return this.req<{ sessions: { sessionId: string; cwd: string; shell: string; exited: boolean; createdAt: number; cols: number; rows: number }[]; capabilities: { available: boolean; backend: string; fallback?: string } }>('GET', `/api/ws/${wsId}/pty/list`);
+  }
+
+  // SSE stream for one PTY session (token via query param — EventSource cannot
+  // set headers; the companion's extractToken already accepts ?token=).
+  ptyOutputStream(wsId: string, sessionId: string, token: string | null): EventSource {
+    const c = this.cfg();
+    const base = c.mode === 'remote' ? (c.remoteUrl || c.directUrl) : c.directUrl;
+    const qs = new URLSearchParams({ sessionId, ...(token ? { token } : {}) });
+    return new EventSource(`${base.replace(/\/+$/, '')}/api/ws/${wsId}/pty/output?${qs.toString()}`);
   }
 
   // ---- detached processes (GUI/desktop apps, dev servers) ----

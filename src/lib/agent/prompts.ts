@@ -6,12 +6,22 @@ export interface WorkspaceContext {
   workspacePath: string;
   tree?: string;          // shallow file listing
   packageInfo?: string;   // package.json summary if present
+  projectName?: string;
+  machineLabel?: string;
 }
 
+// Milestone 4: the AUTHORITATIVE workspace block — one place the model can
+// re-anchor on. Never paraphrased, never re-derived from tool probing.
 function workspaceBlock(ctx: WorkspaceContext): string {
   const parts = [
-    `Platform: ${ctx.platform}. Workspace: ${ctx.workspacePath}`,
-    ctx.tree ? `Workspace files:\n${ctx.tree}` : '',
+    [
+      'WORKSPACE (authoritative — re-anchor here; do not re-derive by probing):',
+      `  root (absolute): ${ctx.workspacePath}`,
+      `  Platform: ${ctx.platform}`,
+      ctx.machineLabel ? `  machine: ${ctx.machineLabel}` : '',
+      ctx.projectName ? `  Selected project: ${ctx.projectName}` : '',
+      ctx.tree ? `  known top-level structure:\n${ctx.tree}` : '',
+    ].filter(Boolean).join('\n'),
     ctx.packageInfo ? `package.json summary:\n${ctx.packageInfo}` : '',
   ];
   return parts.filter(Boolean).join('\n\n');
@@ -25,20 +35,66 @@ Rules:
 - After writing code, VERIFY it: run the relevant build or test command. If it fails, read the error, fix the code, and run again.
 - run_tests and run_build auto-detect the project type (package.json, Cargo.toml, go.mod, Python/pytest) — prefer them over raw commands.
 - GUI/desktop applications and dev servers that keep running: start them with launch_app (returns immediately with a process id); check output with process_status; stop with stop_process. Never wait on them with run_command.
+- Project memory: at task start, use memory_search to recall durable project knowledge (decisions, conventions, known bugs, prior outcomes) — it may already contain what you need. When you discover something a FUTURE agent should know (a design decision you made, a bug you fixed and how, a convention you followed), record it with memory_write in one or two self-contained sentences. Keep the shared notebook updated with notebook_append for findings and handoffs other agents must see.
 - If a tool result starts with [REPEATED CALL — not executed], do not repeat that call: change approach, or call finish when the work is done.
 - Keep the change as small as the task requires. Do not reformat unrelated code.
 - Do not ask questions back; make reasonable assumptions and state them in the final summary.
 - When the task is complete, verify and then summarize: what you built, files touched, and how it was verified.
 `.trim();
 
-export function agentSystemPrompt(ctx: WorkspaceContext, mode: 'chat' | 'task'): string {
+// Cline-class working discipline: every significant action follows the
+// observe → reason → act → verify cycle, and nothing is claimed to work
+// without observed evidence.
+const ORAV_DISCIPLINE = [
+  'WORKING DISCIPLINE — observe → reason → act → verify:',
+  '- OBSERVE before acting: inspect the relevant files/paths for the current step; never act on assumptions about file contents or project state.',
+  '- REASON: decide the single next meaningful action that moves the task forward. Prefer the smallest change that can be verified.',
+  '- ACT: execute exactly one tool action per step and READ the actual result.',
+  '- VERIFY: if an edit fails, read the failure and fix the real cause before retrying (bounded: change approach after 2 failed attempts). If a build/test fails, read the actual error output and repair the code it points to. Never claim success because you ATTEMPTED an operation — verify it with a tool (read the file back, run the test, check the process status).',
+  '- If a command times out, distinguish a timeout from a broken application (check process status / logs). If a process keeps running, report it as running — do not pretend it exited.',
+  '- Finish only when every requirement has observed evidence; otherwise finish honestly with PARTIAL/BLOCKED and what remains.',
+].join('\n');
+
+// Plan mode (Cline Plan/Act): investigate and propose — never mutate.
+export const PLAN_MODE_ADDON = [
+  'PLAN MODE — read-only investigation and planning:',
+  '- You MUST NOT modify files, create/delete paths, install anything, or start/stop processes. Write tools are disabled for this run.',
+  '- Investigate first: map the relevant directories, read the involved files, search symbols/usages, inspect configuration and package manifests.',
+  '- Identify existing implementations BEFORE proposing new ones; note the project conventions you observed.',
+  '- Then produce a structured implementation plan: numbered steps, exact files to create/modify (paths), what each change does, risks/edge cases, and the EXACT verification command for each step (test/build to run afterwards).',
+  '- State open questions and assumptions explicitly. The user reviews and approves the plan before Act mode executes it.',
+].join('\n');
+
+export function agentSystemPrompt(ctx: WorkspaceContext, mode: 'chat' | 'task', devMode?: 'plan' | 'act'): string {
   return [
     `You are the LocalForge coding agent operating directly inside the user's authorized workspace on their machine. ${workspaceBlock(ctx)}`,
     mode === 'task'
       ? 'Complete the user task autonomously end to end. Use the provided tools for every file and command operation.'
       : 'Help with the user request. Use the provided tools when action is needed; answer questions concisely.',
+    ORAV_DISCIPLINE,
+    devMode === 'plan' ? PLAN_MODE_ADDON : '',
     AGENT_RULES,
-  ].join('\n\n');
+  ].filter(Boolean).join('\n\n');
+}
+
+// Project rules & skills (Cline Rules/Skills equivalent): rules are always
+// in effect; only skills whose NAME or heading matches task keywords are
+// injected — relevant guidance without bloating every prompt.
+export function projectGuidanceBlock(rules: string | null, skills: { name: string; content: string }[], task: string): string {
+  const parts: string[] = [];
+  if (rules?.trim()) parts.push(['=== PROJECT RULES (from .localforge/rules.md — ALWAYS in effect) ===', rules.trim()].join('\n'));
+  const t = task.toLowerCase();
+  const relevant = (skills ?? []).filter((s) => {
+    const name = s.name.toLowerCase();
+    if (t.includes(name) || name.split(/[-_\s]+/).some((w) => w.length > 3 && t.includes(w))) return true;
+    const heading = s.content.split('\n').find((l) => l.startsWith('# '))?.toLowerCase() ?? '';
+    return heading.split(/[\s-]+/).some((w) => w.length > 4 && t.includes(w));
+  }).slice(0, 3);
+  for (const s of relevant) parts.push(['=== PROJECT SKILL: ' + s.name + ' ===', s.content.trim()].join('\n'));
+  if ((skills ?? []).length > relevant.length) {
+    parts.push(`Available project skills (load with the project-guidance panel when needed): ${(skills ?? []).map((s) => s.name).join(', ')}`);
+  }
+  return parts.length ? parts.join('\n\n') : '';
 }
 
 export function fallbackSystemAddon(): string {

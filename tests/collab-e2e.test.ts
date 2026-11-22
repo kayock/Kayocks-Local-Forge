@@ -163,11 +163,11 @@ beforeAll(async () => {
   }));
 });
 
-afterAll(async () => {
+afterAll(async () => { /* hook timeout raised: companion shutdown + rm can exceed bun's 5s default */
   for (const p of [...companions, ...stubs]) { try { p.kill('SIGTERM'); } catch { /* ignore */ } }
   await new Promise((r) => setTimeout(r, 300));
   for (const d of [HOME_A, HOME_B, HOME_C, WS_A]) await fsp.rm(d, { recursive: true, force: true }).catch(() => {});
-});
+}, 20000);
 
 function makeConfig(stubB: string, stubC: string) {
   return {

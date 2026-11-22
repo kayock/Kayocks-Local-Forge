@@ -1,10 +1,17 @@
+import fs from 'node:fs';
+import path from 'node:path';
 // Companion control-plane HTTP contract consumed by src/lib/mesh/client.ts.
 import { sendJson, readBody } from './http-utils.js';
 import { findWorkspace } from './config.js';
+import * as checkpoints from './checkpoints.js';
 import { hardwareInventory } from './platform.js';
 import * as model from './modelmgr.js';
 import * as mesh from './mesh.js';
 import * as memory from './agentmem.js';
+import * as tasks from './tasks.js';
+import * as coordination from './coordination.js';
+import * as memoryStore from './memory.js';
+import { discoveryStatus } from './discovery.js';
 import { loadModel as legacyLoad, unloadModel as legacyUnload } from './providers.js';
 
 function respond(res, data) { return sendJson(res, data?.status >= 400 ? data.status : 200, data); }
@@ -42,6 +49,7 @@ export async function routeControl(req, res, url, p) {
   if (p === '/api/network' && method === 'POST') { respond(res, mesh.setNetwork(await readBody(req, 32*1024))); return true; }
   if (p === '/api/network/test' && method === 'POST') { respond(res, await mesh.networkTest((await readBody(req, 32*1024)).url)); return true; }
   if (p === '/api/mesh/status' && method === 'GET') { respond(res, mesh.meshStatus()); return true; }
+  if (p === '/api/mesh/discover' && method === 'GET') { respond(res, discoveryStatus()); return true; }
   if (p === '/api/mesh/connect' && method === 'POST') {
     const b = await readBody(req, 32*1024);
     respond(res, await mesh.connectPeer(b.url, b)); return true;
@@ -54,8 +62,8 @@ export async function routeControl(req, res, url, p) {
     if (method === 'GET') { respond(res, await mesh.peerStatus(dec(m[1]))); return true; }
     if (method === 'DELETE') { respond(res, mesh.removePeer(dec(m[1]))); return true; }
   }
-  if ((m = match(p, /^\/api\/mesh\/([^/]+)\/proxy(\/api\/.*)$/))) {
-    const r = await mesh.proxyPeer(dec(m[1]), req, m[2], url.search || '');
+  if ((m = match(p, /^\/api\/mesh\/([^/]+)\/(proxy|p)(\/.*)$/))) {
+    const r = await mesh.proxyPeer(dec(m[1]), req, m[3], url.search || '');
     res.writeHead(r.status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
     res.end(r.body); return true;
   }
@@ -77,6 +85,127 @@ export async function routeControl(req, res, url, p) {
   if ((m = match(p, /^\/api\/ws\/([^/]+)\/revision$/)) && method === 'GET') {
     const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
     respond(res, await memory.workspaceRevision(ws)); return true;
+  }
+
+  // ---- RC3: project rules & skills (.localforge/ in the workspace) ----
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/project-guidance$/))) {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    const readLocal = (rel, cap) => {
+      try {
+        const full = path.join(ws.path, rel);
+        if (!fs.existsSync(full) || !fs.statSync(full).isFile()) return null;
+        const content = fs.readFileSync(full, 'utf8');
+        return content.length > cap ? content.slice(0, cap) + `…[truncated at ${cap} chars]` : content;
+      } catch { return null; }
+    };
+    const rules = readLocal('.localforge/rules.md', 12 * 1024);
+    const skills = [];
+    const skillsDir = path.join(ws.path, '.localforge', 'skills');
+    try {
+      if (fs.existsSync(skillsDir)) {
+        for (const f of fs.readdirSync(skillsDir).filter((f) => f.endsWith('.md')).slice(0, 24)) {
+          const content = readLocal(path.join('.localforge', 'skills', f), 8 * 1024);
+          if (content) skills.push({ name: f.replace(/\.md$/, ''), content });
+        }
+      }
+    } catch { /* unreadable skills dir */ }
+    respond(res, { rules, skills });
+    return true;
+  }
+
+  // ---- RC3: task checkpoints (shadow git) ----
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/checkpoints$/))) {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    if (method === 'GET') { respond(res, checkpoints.listCheckpoints(ws)); return true; }
+    if (method === 'POST') { respond(res, checkpoints.createCheckpoint(ws, (await readBody(req, 8 * 1024))?.label)); return true; }
+  }
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/checkpoints\/([\w.:-]+)\/diff$/))) {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    respond(res, checkpoints.checkpointDiff(ws, dec(m[2]))); return true;
+  }
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/checkpoints\/([\w.:-]+)\/restore$/))) {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    respond(res, checkpoints.restoreCheckpoint(ws, dec(m[2]))); return true;
+  }
+
+  // ---- Milestone 2: cross-machine task packets ----
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/tasks$/))) {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    if (method === 'GET') { respond(res, tasks.listTasks(ws.id, url.searchParams)); return true; }
+    if (method === 'POST') { respond(res, tasks.createTask(ws.id, await readBody(req, 128 * 1024))); return true; }
+  }
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/tasks\/([^/]+)\/(ack|progress|complete|fail|cancel)$/)) && method === 'POST') {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    const id = dec(m[2]);
+    const body = await readBody(req, 128 * 1024).catch(() => ({}));
+    const action = m[3];
+    if (action === 'ack') respond(res, tasks.ackTask(ws.id, id, body));
+    else if (action === 'progress') respond(res, tasks.progressTask(ws.id, id, body));
+    else if (action === 'complete') respond(res, tasks.completeTask(ws.id, id, body));
+    else if (action === 'fail') respond(res, tasks.failTask(ws.id, id, body));
+    else respond(res, tasks.cancelTask(ws.id, id, body));
+    return true;
+  }
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/tasks\/([^/]+)$/)) && method === 'GET') {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    respond(res, tasks.getTask(ws.id, dec(m[2]))); return true;
+  }
+
+  // ---- Milestone 3: persistent project memory ----
+  if (p === '/api/memory/capabilities' && method === 'GET') { respond(res, memoryStore.memoryCapabilities()); return true; }
+  if (p === '/api/memory/embeddings' && method === 'POST') {
+    const b = await readBody(req, 8 * 1024);
+    respond(res, b && b.endpoint === null ? memoryStore.configureEmbeddings(null) : memoryStore.configureEmbeddings(b));
+    return true;
+  }
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/memory$/))) {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    if (method === 'GET') { respond(res, memoryStore.listMemories(ws.id, url.searchParams)); return true; }
+    if (method === 'POST') { respond(res, memoryStore.writeMemory(ws.id, await readBody(req, 64 * 1024))); return true; }
+  }
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/memory\/search$/)) && method === 'GET') {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    respond(res, await memoryStore.searchMemory(ws.id, url.searchParams)); return true;
+  }
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/memory\/files$/)) && method === 'GET') {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    respond(res, await memoryStore.searchFiles(ws.id, url.searchParams)); return true;
+  }
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/memory\/index$/)) && method === 'POST') {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    const b = await readBody(req, 8 * 1024).catch(() => ({}));
+    respond(res, await memoryStore.indexWorkspace(ws, { full: b?.full === true })); return true;
+  }
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/memory\/stats$/)) && method === 'GET') {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    respond(res, memoryStore.memoryStats(ws.id)); return true;
+  }
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/memory\/export$/)) && method === 'GET') {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    respond(res, memoryStore.exportMemory(ws.id)); return true;
+  }
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/memory\/import$/)) && method === 'POST') {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    const b = await readBody(req, 16 * 1024 * 1024);
+    respond(res, memoryStore.importMemory(ws.id, b, { replace: b?.replace === true })); return true;
+  }
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/memory\/([^/]+)$/))) {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    const id = dec(m[2]);
+    if (method === 'GET') { respond(res, memoryStore.readMemory(ws.id, id)); return true; }
+    if (method === 'PUT') { respond(res, memoryStore.updateMemory(ws.id, id, await readBody(req, 64 * 1024))); return true; }
+    if (method === 'DELETE') { respond(res, memoryStore.deleteMemory(ws.id, id)); return true; }
+  }
+
+  // ---- Milestone 2: workspace write reservations (advisory locks) ----
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/locks$/))) {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    if (method === 'GET') { respond(res, coordination.listLocks(ws.id)); return true; }
+    if (method === 'POST') {
+      const b = await readBody(req, 16 * 1024);
+      respond(res, b.release ? coordination.releaseLock(ws.id, b.path, b.owner) : coordination.acquireLock(ws.id, b.path, b.owner, b));
+      return true;
+    }
   }
   return false;
 }

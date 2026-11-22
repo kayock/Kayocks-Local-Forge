@@ -42,9 +42,11 @@ import type {
 } from './types';
 import { normalizeProtocolMode, toolResultMessage, FALLBACK_NUDGE } from './protocol';
 import { normalizeToolArgs, validateToolArgs, canonicalToolName, summarizeError, canonRelPath } from './tools';
+import { parseToolCallArgs } from './toolargs';
 import { detectToolDialect, type ToolDialect } from './dialects';
 import { evaluateCompletion } from './completion';
 import { buildHandoffPacket, contractPromptBlock, bumpInPlace, type TaskContract } from './task-contract';
+import { RecoveryCoordinator, canonicalSignature, type StallClass } from './recovery';
 
 export interface RunnerConfig {
   companion: CompanionClient;
@@ -74,11 +76,17 @@ export interface RunnerConfig {
   // coordinator-supplied steering applied before the first turn (queued the
   // moment an assignment is created, consumed at the run's first boundary)
   initialSteering?: string[];
+  // Milestone 4: evidence-triggered automatic steering (truncated edits,
+  // stuck validation streaks). Default on; false disables entirely.
+  autoSteering?: boolean;
   // regex-source strings; writes/edits/deletes to matching paths are refused
   protectedPaths?: string[];
   // ---- Forge upgrade (Problems A/C/D/E, Part 2) ----
   // canonical workspace identity surfaced to tools and tool feedback
-  workspaceMeta?: { id: string; rootPath: string; machineLabel: string; platform: string; knownTree?: string };
+  workspaceMeta?: { id: string; rootPath: string; machineLabel: string; platform: string; projectName?: string; knownTree?: string };
+  // Cline-style Plan/Act: 'plan' strips mutating tools and switches the
+  // system prompt to read-only investigation + planning.
+  devMode?: 'plan' | 'act';
   // coordinator-owned contract; when present, finish passes through the
   // completion gate instead of being accepted on the model's word
   contract?: TaskContract;
@@ -91,6 +99,9 @@ export interface RunnerConfig {
   // escalation target for stalls (Problem E): return a replacement
   // provider/model, or null when none is configured
   escalateTo?: () => { provider: ProviderConfig; model: string; label: string } | null;
+  // Milestone 1: workspace revision lookup for tool results. Optional; when
+  // absent, FS-write results carry the per-file mtime fingerprint only.
+  fetchWorkspaceRevision?: () => Promise<string | null>;
   // coordinator hook: fired whenever the runner escalates, so the handoff is
   // recorded in the coordinator's report (Problem A/E bookkeeping)
   onEscalation?: (esc: { kind: string; message: string; tool?: string }) => void;
@@ -117,13 +128,19 @@ const REPEAT_LIMIT_READS = 3;     // list_dir / read_file / search / process_sta
 const REPEAT_LIMIT_FAILED = 3;    // identical failing calls get one extra retry
 // Escalation (Problem A): after this many BLOCKED attempts of the same
 // signature with an unchanged workspace, the coordinator escalates.
-const STALL_ESCALATE_AFTER = 2;
 const REPEAT_EXEMPT = new Set(['finish']);
+// Plan mode (Cline Plan/Act): mutating tools are removed from the run and
+// hard-blocked at execution time (defense in depth).
+const PLAN_BLOCKED = new Set(['write_file', 'edit_file', 'append_file', 'create_dir', 'delete_path', 'extract_archive', 'install_dependencies', 'launch_app', 'stop_process']);
+// After the recovery ladder is exhausted, this many further NO-PROGRESS
+// turns (blocked calls or pure activity) trigger the honest stop. A genuine
+// write/edit resets the counter — the model keeps its finish window.
+const STALL_STOP_AFTER_NO_PROGRESS = 4;
 // Tools whose success changes workspace state (drives the workspace version
 // used to distinguish pointless repetition from legitimate re-runs).
 const FS_WRITERS = new Set(['write_file', 'edit_file', 'create_dir', 'delete_path', 'extract_archive']);
 const FS_MAYBE_WRITERS = new Set(['run_command', 'launch_app', 'stop_process', 'install_dependencies', 'run_tests', 'run_build']);
-const READ_TOOLS = new Set(['read_file', 'list_dir', 'search_project', 'process_status', 'workspace_info']);
+const READ_TOOLS = new Set(['read_file', 'list_dir', 'search_project', 'process_status', 'workspace_info', 'workspace_map']);
 
 export interface RunResult {
   content: string;
@@ -136,6 +153,12 @@ export interface RunResult {
   paused?: boolean;
   // Forge upgrade — Problem D: coordinator verdict, not the model's claim
   completion?: CompletionResult;
+  // Milestone 1: files this run actually wrote/edited (structured result)
+  filesChanged: string[];
+  usage?: { promptTokens: number | null; completionTokens: number | null };
+  // Milestone 4: true when the coordinator stopped the run honestly after
+  // exhausting the recovery ladder (an actionable stopped state, not a hang)
+  stalled?: boolean;
 }
 
 interface JournalEntry {
@@ -170,13 +193,57 @@ export class AgentRunner {
   private gateRefusals = 0;
   private lastCompletion: CompletionResult | undefined;
   private lastEscalatedTo: string | null = null;
+  // Milestone 4: outcome-aware recovery + honest stalled stop
+  private recovery: RecoveryCoordinator;
+  private stallStop: { tool: string; sig: string; stallClass: StallClass } | null = null;
+  private lastStallClass: StallClass = 'repetition';
+  // Milestone 4 (refined): after the ladder exhausts, the model still gets a
+  // finish window — the honest stop fires only after repeated further blocks,
+  // or at the turn limit without completion (stallPending).
+  private exhaustedNotified = new Set<string>();
+  private turnsAfterExhausted = 0;
+  private stallPending = false;
+  private lastBoundaryHadManual = false;
+  private boundariesSinceManual = 99;
+  private sentEnvelopes = new Set<string>();
+  // Milestone 1: cumulative token usage for the run (from usage events)
+  private usageTotal: { promptTokens: number | null; completionTokens: number | null } = { promptTokens: null, completionTokens: null };
+
+  /** Plan mode removes mutating tools from the run entirely. */
+  private toolsForRun(): ToolDef[] {
+    if (this.cfg.devMode !== 'plan') return this.cfg.tools;
+    return this.cfg.tools.filter((t) => !PLAN_BLOCKED.has(t.name));
+  }
 
   constructor(private cfg: RunnerConfig) {
     this.protocol = normalizeProtocolMode(cfg.toolProtocol);
     if (cfg.initialSteering?.length) this.steeringQueue.push(...cfg.initialSteering);
+    this.recovery = new RecoveryCoordinator({
+      contract: cfg.contract,
+      autoSteering: cfg.autoSteering,
+      onEvent: (e) => {
+        if (e.kind === 'auto_steering') {
+          this.emit({ type: 'auto_steering', trigger: e.trigger!, text: e.message });
+        } else if (e.kind === 'recovery_action') {
+          this.emit({ type: 'recovery_action', action: e.action!, stallClass: e.stallClass!, step: e.step!, message: e.message });
+        } else if (e.kind === 'stalled') {
+          this.emit({ type: 'stalled', message: e.message });
+        } else if (e.kind === 'streak_recovery') {
+          this.emit({ type: 'loop_detected', tool: 'validation', count: 3, action: 'recovery', message: e.message });
+        }
+      },
+      onEscalation: (e) => {
+        this.cfg.onEscalation?.({ kind: e.kind, message: e.message });
+        this.emit({ type: 'escalation', fromModel: this.cfg.model, reason: e.message });
+      },
+    });
   }
 
   private emit(e: AgentEvent) {
+    if (e.type === 'usage') {
+      if (e.usage.promptTokens != null) this.usageTotal.promptTokens = (this.usageTotal.promptTokens ?? 0) + e.usage.promptTokens;
+      if (e.usage.completionTokens != null) this.usageTotal.completionTokens = (this.usageTotal.completionTokens ?? 0) + e.usage.completionTokens;
+    }
     this.cfg.onEvent(e);
   }
 
@@ -245,9 +312,12 @@ export class AgentRunner {
         },
         readFile: async (p) => {
           const f = await companion.readFile(workspaceId, p);
-          return { content: f.content, size: f.size };
+          return { content: f.content, size: f.size, modifiedAt: (f as any).modifiedAt };
         },
-        writeFile: async (p, c) => companion.writeFile(workspaceId, p, c),
+        writeFile: async (p, c, opts) => companion.writeFile(workspaceId, p, c, opts),
+        // Milestone 1: diff preview BEFORE approving a write (companion-side
+        // unified diff against the file on disk).
+        diffPreview: (companion as any).diffPreview ? async (p: string, content: string) => (companion as any).diffPreview(workspaceId, p, content) : undefined,
         mkdir: async (p) => { await companion.mkdir(workspaceId, p); },
         deletePath: async (p) => { await companion.deletePath(workspaceId, p, true); },
         rename: async (a, b) => { await companion.rename(workspaceId, a, b); },
@@ -274,6 +344,10 @@ export class AgentRunner {
       // Forge upgrade: canonical workspace identity surfaced to every tool so
       // results can state the machine and absolute root they operated on.
       workspaceMeta: this.cfg.workspaceMeta,
+      // Milestone 3: durable project memory + shared notebook/scratchpad over
+      // the workspace host companion. Absent methods (mocks) → tools report
+      // availability honestly.
+      memory: this.buildMemoryHost(companion),
       // Forge upgrade (Part 6): shared local browser over CDP.
       browser: this.cfg.companionBrowser ? {
         open: (o) => this.cfg.companionBrowser!.open(workspaceId, o ?? {}),
@@ -283,6 +357,32 @@ export class AgentRunner {
         close: () => this.cfg.companionBrowser!.close(workspaceId),
         status: () => this.cfg.companionBrowser!.status(workspaceId),
       } : undefined,
+    };
+  }
+
+  // Milestone 3: memory host over the workspace-host companion. Every method
+  // degrades with a clear error when the companion lacks the memory API.
+  private buildMemoryHost(companion: CompanionClient): NonNullable<ToolContext['memory']> | undefined {
+    const c = companion as any;
+    if (typeof c.memorySearch !== 'function') return undefined;
+    const wsId = this.cfg.workspaceId;
+    const agentTag = this.cfg.workspaceMeta?.machineLabel ? `agent@${this.cfg.workspaceMeta.machineLabel}` : 'agent';
+    return {
+      search: (q, opts) => c.memorySearch(wsId, q, opts),
+      read: (id) => c.memoryRead(wsId, id),
+      write: (kind, content, opts) => c.memoryWrite(wsId, { kind, content, tags: opts?.tags, refs: opts?.refs, agentId: agentTag }),
+      notebookAppend: (kind, content, opts) => c.notebookAppend(wsId, { agentId: agentTag, kind, content, refs: opts?.refs }),
+      notebookSearch: (q, opts) => (async () => {
+        const r = await c.notebookList(wsId, opts);
+        const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
+        const results = (r.entries || []).filter((e: any) => {
+          const hay = `${e.kind} ${e.agentId} ${e.content}`.toLowerCase();
+          return terms.some((t) => hay.includes(t));
+        }).slice(0, opts?.limit ?? 20);
+        return { results };
+      })(),
+      readScratchpad: (agentId) => c.readScratchpad(wsId, agentId),
+      writeScratchpad: (agentId, patch) => c.writeScratchpad(wsId, agentId, patch),
     };
   }
 
@@ -307,23 +407,82 @@ export class AgentRunner {
   // return actionable tool results WITHOUT consuming an approval prompt.
   private async executeCall(rawName: string, rawArgs: unknown, callId: string): Promise<{ entry: ToolLogEntry; args: Record<string, any>; name: string }> {
     const name = canonicalToolName(rawName);
-    const { args, aliasesApplied } = normalizeToolArgs(rawName, rawArgs);
     const entry: ToolLogEntry = {
       id: `t_${++this.logId}`,
       tool: name,
-      args,
+      args: {},
       status: 'running',
       startedAt: Date.now(),
       machine: this.cfg.workspaceMeta?.machineLabel,
     };
-    if (aliasesApplied && Object.keys(aliasesApplied).length) {
-      entry.output = `Note: argument aliases normalized: ${Object.entries(aliasesApplied).map(([a, b]) => `${a} → ${b}`).join(', ')}.`;
-    }
 
     const finishArgs = () => { entry.endedAt = Date.now(); };
 
+    // Milestone 4: TRUNCATED tool-call arguments are refused, not silently
+    // repaired into broken writes. A call cut off mid-JSON (large write_file
+    // payloads are the classic case) triggers automatic steering toward
+    // small, targeted edits.
+    if (typeof rawArgs === 'string') {
+      const parsed = parseToolCallArgs(rawArgs);
+      if (!parsed.ok || parsed.truncated) {
+        entry.args = { _raw: parsed.rawPreview ?? '' };
+        entry.argsTruncated = !!parsed.truncated;
+        entry.argsError = parsed.error ?? 'truncated tool-call arguments';
+        entry.status = 'error';
+        entry.validation = parsed.truncated ? 'schema-invalid' : undefined;
+        entry.parse = parsed.truncated ? 'truncated' : 'failed';
+        entry.output = [
+          `Error: tool-call arguments could not be parsed${parsed.truncated ? ' — the call looks TRUNCATED (cut off mid-JSON)' : ''}. The call was NOT executed. No files were changed by this call.`,
+          parsed.error ? `Parse failure: ${parsed.error}` : '',
+          parsed.rawPreview ? `Received (capped): ${parsed.rawPreview.slice(0, 400)}` : '',
+          'Re-issue the COMPLETE call with valid JSON arguments. For very large files, build them with several append_file calls instead of one huge write_file, or use edit_file with SHORT find/replace snippets.',
+        ].filter(Boolean).join('\n');
+        // failure-pattern recovery guidance on the entry itself (spec §3):
+        const guidance = this.recovery.noteInvalidCall(name, entry.argsError, { truncated: true });
+        if (guidance) { entry.output += `\n${guidance}`; entry.recoveryIssued = true; }
+        finishArgs();
+        this.emit({ type: 'tool_end', call: { id: callId, name, args: entry.args }, entry });
+        if (parsed.truncated && ['write_file', 'edit_file', 'append_file'].includes(name)) {
+          this.recovery.queueAutoSteering('truncated-edit', [
+            'Your last large file write was TRUNCATED (cut off mid-JSON) and was NOT applied to the workspace.',
+            'Trigger: truncated-edit',
+            'Prefer small, targeted edits: use edit_file for in-place changes and append_file to build large files in sections. Keep every single tool call small enough to finish.',
+          ].join('\n'));
+        }
+        return { entry, args: entry.args, name };
+      }
+    }
+
+    // clean/repaired string payloads: use the PARSED args (normalizeToolArgs
+    // would otherwise fail its own JSON.parse on damaged-but-repairable args).
+    let parseNote = '';
+    let parseFrom: 'object' | 'clean' | 'repaired' | 'truncated' | 'failed' = 'object';
+    let normalizedRaw: unknown = rawArgs;
+    if (typeof rawArgs === 'string') {
+      const parsed = parseToolCallArgs(rawArgs);
+      parseFrom = parsed.from === 'raw' ? 'failed' : parsed.from;
+      normalizedRaw = parsed.args ?? rawArgs;
+      if (parsed.repairs?.length) {
+        parseNote = `Note: arguments needed serialization repair (${parsed.repairs.slice(0, 3).join('; ')}) — the repaired payload was executed.`;
+      }
+    }
+    const { args, aliasesApplied } = normalizeToolArgs(rawName, normalizedRaw);
+    entry.args = args;
+    entry.parse = parseFrom;
+    if (parseNote) entry.output = parseNote;
+    if (aliasesApplied && Object.keys(aliasesApplied).length) {
+      entry.output = `${entry.output ? entry.output + '\n' : ''}Note: argument aliases normalized: ${Object.entries(aliasesApplied).map(([a, b]) => `${a} → ${b}`).join(', ')}.`;
+    }
+
     // unknown tool → exact repair information
-    const def = this.cfg.tools.find((t) => t.name === name);
+    const def = this.toolsForRun().find((t) => t.name === name);
+    if (!def && this.cfg.devMode === 'plan' && PLAN_BLOCKED.has(name)) {
+      entry.status = 'error';
+      finishArgs();
+      entry.output = `Plan mode: "${name}" is disabled — this run is read-only. Investigate and produce the plan; the user approves execution in Act mode.`;
+      this.emit({ type: 'tool_end', call: { id: callId, name, args }, entry });
+      return { entry, args, name };
+    }
     if (!def) {
       entry.status = 'error';
       finishArgs();
@@ -335,27 +494,39 @@ export class AgentRunner {
     const invalid = validateToolArgs(name, args);
     if (invalid) {
       entry.status = 'error';
+      entry.validation = 'schema-invalid';
       finishArgs();
-      entry.output = invalid;
+      const guidance = this.recovery.noteInvalidCall(name, invalid);
+      entry.output = guidance ? `${invalid}\n${guidance}` : invalid;
+      if (guidance) entry.recoveryIssued = true;
       return { entry, args, name };
     }
 
-    // repetition guard (spec §3.7 + Forge Problem A): identical calls are
-    // blocked only when the workspace has NOT changed since the last attempt
-    // — a legitimate re-run after a real change is always allowed.
-    const sig = `${name}::${stableArgs(args)}`;
+    // repetition guard (spec §3.7 + Forge Problem A + Milestone 4): identical
+    // calls are blocked only when the workspace has NOT changed since the
+    // last attempt. Canonical signatures make equivalent spellings collide
+    // (bare list_dir ≡ list_dir {path:'.'}). Blocks feed the recovery
+    // ladder: refocus → strategy directive → honest stalled stop.
+    const sig = canonicalSignature(name, args);
     const prev = this.recentCalls.get(sig);
     if (prev && !REPEAT_EXEMPT.has(name) && prev.workspaceVersion === this.workspaceVersion) {
       const reads = READ_TOOLS.has(name);
       const limit = prev.status === 'ok' ? (reads ? REPEAT_LIMIT_READS : REPEAT_LIMIT_DEFAULT) : REPEAT_LIMIT_FAILED;
-      if (prev.count >= limit) {
+      const emptyButOk = prev.outcome === 'ok-empty';
+      // A successful COMMAND with empty output (exit 0, no stdout) is exempt
+      // from repetition blocking: it cannot be "re-derived" for new info, the
+      // per-agent turn limit remains the hard bound, and stage agents with
+      // scripted no-op warmups must reach their OWN turn limits (Test E).
+      // READ tools returning MISSING/EMPTY are NOT exempt — a discovery loop
+      // on a missing path is exactly the repetition stall the guard exists for.
+      if (prev.count >= limit && !(emptyButOk && FS_MAYBE_WRITERS.has(name))) {
         prev.blocked++;
-        const emptyButOk = prev.outcome === 'ok-empty';
         const changedHint = prev.status === 'ok'
           ? 'Repeating it cannot produce new information.'
           : 'Repeating the exact same failing call with identical arguments will fail identically.';
         entry.status = prev.status === 'ok' ? 'ok' : 'error';
         entry.outcome = 'blocked';
+        entry.repeatBlocked = true;
         finishArgs();
         entry.output = [
           `[REPEATED CALL — not executed] This exact ${name} call has already been made ${prev.count} times with identical arguments and the workspace has NOT changed since.`,
@@ -372,9 +543,47 @@ export class AgentRunner {
           action: 'blocked',
           message: `Identical ${name} call repeated ${prev.count}× (workspace unchanged) — previous real result returned with recovery guidance instead of re-executing.`,
         });
-        // Problem A: structured coordinator recovery after repeated blocks
-        if (prev.blocked >= STALL_ESCALATE_AFTER) {
-          await this.handleStall(name, args, prev);
+        this.recentCalls.set(sig, {
+          count: prev.count,
+          blocked: prev.blocked,
+          status: prev.status,
+          outcome: prev.outcome,
+          output: prev.output,
+          workspaceVersion: this.workspaceVersion,
+        });
+        // Milestone 4: the two-step recovery ladder, then the honest stop.
+        const stallClass: StallClass = this.recovery.classify() ?? (prev.status === 'error' ? 'verification' : 'repetition');
+        this.lastStallClass = stallClass;
+        const env = this.recovery.nextStep(sig, stallClass, {
+          tool: name,
+          lastResult: prev.output,
+          alternatives: suggestAlternatives(name, args, prev.outcome),
+          contract: this.cfg.contract,
+        });
+        if (env) {
+          this.messages.push({ role: 'user', content: env.text });
+          // compatibility: stall_detected keeps firing on the first step
+          if (env.text.includes('ACTIVE RECOVERY 1/2')) {
+            this.emit({
+              type: 'stall_detected',
+              tool: name,
+              attempts: prev.count + prev.blocked,
+              message: `No progress after ${prev.count + prev.blocked} attempts of ${name} — coordinator recovery envelope injected.`,
+            });
+          }
+        } else {
+          // ladder exhausted: give the model ONE final envelope per signature
+          // and keep the run alive briefly so it can still call finish —
+          // the honest stop fires after repeated further blocks.
+          if (!this.exhaustedNotified.has(sig)) {
+            this.exhaustedNotified.add(sig);
+            this.stallPending = true;
+            this.messages.push({ role: 'user', content: [
+              `[COORDINATOR — RECOVERY EXHAUSTED]`,
+              `The ${name} call was blocked again after two recovery steps (${this.lastStallClass} stall).`,
+              `This is the final coordinator intervention: call finish now with an honest summary of what was completed, what remains open, and which requirements are unmet (status PARTIAL/BLOCKED). Do not repeat the blocked call.`,
+            ].join('\n') });
+          }
         }
         return { entry, args, name };
       }
@@ -398,6 +607,15 @@ export class AgentRunner {
       const res = await def.run(args, ctx);
       entry.status = res.isError ? 'error' : 'ok';
       entry.output = entry.output ? `${entry.output}\n${res.output}` : res.output;
+      this.recovery.noteValidCall();
+      // Milestone 1: structured results — attached diff, changed file, and a
+      // workspace-revision note on FS writes (fetched only when wired).
+      if (res.diff) {
+        entry.diff = res.diff;
+        entry.diffPath = res.diffPath;
+        this.emit({ type: 'diff_preview', path: res.diffPath || String(args.path ?? ''), diff: res.diff, added: (res as any).diffAdded, removed: (res as any).diffRemoved });
+      }
+      if (res.changedFile) entry.changedFile = res.changedFile;
       // Part 2 structured execution feedback + workspace version tracking.
       // Only deterministic FS writers bump the workspace version: a command
       // does not count as a change by itself, otherwise re-running an
@@ -407,11 +625,34 @@ export class AgentRunner {
       if (FS_WRITERS.has(name)) {
         entry.fsChanged = true;
         this.workspaceVersion++;
-        if (name === 'write_file') this.filesWritten.add(String(args.path ?? ''));
+        if (name === 'write_file' || name === 'edit_file') {
+          const p = canonRelPath(args.path ?? res.changedFile ?? '');
+          if (p) {
+            this.filesWritten.add(p);
+            // Milestone 4: measurable progress recorded on the contract with
+            // the actual file evidence (never just the model's claim).
+            if (this.cfg.contract && entry.status === 'ok') {
+              this.cfg.contract.progress.push({ text: `${name} succeeded: ${p}`, at: Date.now(), by: `runner:${this.cfg.model}`, filesTouched: [p] });
+              bumpInPlace(this.cfg.contract);
+              this.cfg.onContractUpdate?.(this.cfg.contract);
+            }
+          }
+        }
         if (name === 'extract_archive') {
           const dest = canonRelPath(args.dest ?? '.');
           const nested = (res.output.match(/nested project root "([^"]+)"/) || [])[1];
           this.filesWritten.add(nested && (args.flatten === true || args.flatten === 'true') ? dest : `${dest}/${nested ?? ''}`.replace(/\/$/, ''));
+        }
+        // Milestone 1: workspace revision in relevant tool results. Fetched
+        // lazily and never allowed to break the tool result on failure.
+        if (this.cfg.fetchWorkspaceRevision) {
+          try {
+            const rev = await this.cfg.fetchWorkspaceRevision();
+            if (rev) {
+              entry.workspaceRevision = rev.slice(0, 12);
+              entry.output = `${entry.output}\nworkspace revision: ${rev.slice(0, 12)}`;
+            }
+          } catch { /* revision lookup is best-effort */ }
         }
       } else if (FS_MAYBE_WRITERS.has(name)) {
         entry.fsChanged = true; // commands may modify the workspace (metadata only)
@@ -457,58 +698,11 @@ export class AgentRunner {
     return { entry, args, name };
   }
 
-  // Problem A: structured recovery + escalation when no progress is made.
-  // The envelope is built from REAL tool results (the journal), never from
-  // fabricated assumptions.
-  private async handleStall(tool: string, args: Record<string, any>, prev: JournalEntry) {
-    const sigDesc = `${tool}(${Object.entries(args).map(([k, v]) => `${k}=${JSON.stringify(String(v)).slice(0, 60)}`).join(', ')})`;
-    const lastResult = prev.output.slice(0, 800);
-    const emptyOk = prev.outcome === 'ok-empty';
-    const alternatives = suggestAlternatives(tool, args, prev.outcome);
-    const envelope = [
-      `[COORDINATOR RECOVERY — no progress detected]`,
-      `You have now attempted the identical call ${sigDesc} ${prev.count + prev.blocked} times without the workspace changing.`,
-      `The last REAL result was (${prev.outcome}): ${lastResult}`,
-      emptyOk
-        ? `This was a SUCCESSFUL result: the empty/absent state it reports is the actual state of the workspace. Repeating the call cannot change it.`
-        : `This call keeps failing identically; retrying the same arguments cannot succeed.`,
-      `Do ONE of the following instead:`,
-      ...alternatives.map((a) => `  • ${a}`),
-      `  • If the task truly cannot progress, call finish with an honest summary saying which requirements remain unmet (status PARTIAL/BLOCKED).`,
-      this.cfg.contract ? `The original task contract and its requirements remain fully in force — they were not changed by this recovery.` : '',
-    ].filter(Boolean).join('\n');
-    this.messages.push({ role: 'user', content: envelope });
-    this.emit({
-      type: 'stall_detected',
-      tool,
-      attempts: prev.count + prev.blocked,
-      message: `No progress after ${prev.count + prev.blocked} attempts of ${tool} — coordinator recovery envelope injected.`,
-    });
-
-    // Escalation (Problem E): when a replacement model is configured and the
-    // stall persists, hand off with the original assignment preserved.
-    if (prev.blocked >= STALL_ESCALATE_AFTER + 1 && this.cfg.escalateTo && this.cfg.contract) {
-      const target = this.cfg.escalateTo();
-      if (target && target.model !== this.cfg.model) {
-        const packet = buildHandoffPacket(this.cfg.contract, {
-          fromModel: this.cfg.model,
-          toModel: target.model,
-          filesTouched: [...this.filesWritten],
-          testsRun: this.testsRun,
-          blockers: [`Repeated no-progress stall on ${sigDesc}`],
-          lastSuccessfulOperation: this.lastSuccess() || 'none recorded',
-          remainingWork: this.cfg.contract.requirements.filter((r) => r.status === 'open' && r.source === 'user').map((r) => r.text),
-        });
-        this.cfg.provider = target.provider;
-        this.cfg.model = target.model;
-        this.lastEscalatedTo = `${target.label ?? 'model'}: ${target.model}`;
-        this.messages.push({ role: 'user', content: packet });
-        this.emit({ type: 'escalation', fromModel: this.cfg.model, toModel: target.model, reason: `Stall on repeated ${tool} calls — escalated with the original assignment preserved.` });
-        this.cfg.onEscalation?.({ kind: 'stall-escalation', message: `Stall on repeated ${tool} calls — escalated to ${target.model} with the original assignment preserved.`, tool });
-        this.recentCalls.clear(); // the new model starts with a clean journal
-      }
-    }
-  }
+  // Milestone 4: the old per-block escalation was replaced by the recovery
+  // coordinator (recovery.ts): a global two-step ladder (workspace_refocus →
+  // strategy_directive) driven by real tool evidence, then an honest stalled
+  // stop. Model escalation still happens when a replacement is configured —
+  // see finalizeStalled().
 
   private lastSuccess(): string | null {
     let last: string | null = null;
@@ -518,9 +712,73 @@ export class AgentRunner {
     return last;
   }
 
+  // Milestone 4: pure-activity backstop — even without an identical-call
+  // block, turns of reads/retries with zero writes/verification trigger the
+  // same two-step ladder and then the honest stop.
+  private checkActivityStall(): boolean {
+    const cls = this.recovery.classify();
+    if (!cls || this.stallStop) return false;
+    const sig = `activity-stall:${cls}`;
+    const env = this.recovery.nextStep(sig, cls, {
+      tool: 'turns without measurable progress',
+      lastResult: this.lastSuccess() || 'no successful operations recorded',
+      alternatives: [
+        'Re-read the task contract requirements and take ONE concrete step toward the next open one (write/edit a file, run the verification command).',
+        'Call finish with an honest PARTIAL/BLOCKED summary if the task genuinely cannot progress.',
+      ],
+      contract: this.cfg.contract,
+    });
+    if (env) {
+      this.messages.push({ role: 'user', content: env.text });
+      return false;
+    }
+    // Ladder consumed: count no-progress turns; the honest stop fires after a
+    // bounded finish window (a real write resets it — see noteTurn).
+    this.turnsAfterExhausted++;
+    if (this.turnsAfterExhausted >= STALL_STOP_AFTER_NO_PROGRESS) {
+      this.stallStop = { tool: 'no-progress turns after exhausted recovery', sig, stallClass: cls };
+      return true;
+    }
+    this.stallPending = true;
+    return false;
+  }
+
+  // Milestone 4: the honest stalled verdict. The run stops instead of
+  // looping; contract records BLOCKED with open problems; the IDE can resume
+  // ("Continue task"), steer, or switch models — full history is preserved.
+  private finalizeStalled(): { content: string; note: string } {
+    const contract = this.cfg.contract;
+    const openReqs = (contract?.requirements ?? []).filter((r) => r.source === 'user' && r.status === 'open').map((r) => r.text);
+    const note = [
+      `STALLED — the coordinator stopped this run after repeated ${this.lastStallClass} stalls with no workspace progress.`,
+      `Requirements still open: ${openReqs.length ? openReqs.slice(0, 5).join(' | ') : '(see task contract)'}`,
+      `Next steps: press "Continue task" and steer the agent with concrete instructions, or switch models in Settings → Agent and continue from the preserved history.`,
+      `All progress, tool results and the complete conversation are preserved — nothing was lost.`,
+    ].join('\n');
+    if (contract && contract.status === 'ACTIVE') {
+      contract.status = 'BLOCKED';
+      contract.statusNote = 'stalled-run verdict: the recovery ladder was exhausted without measurable workspace progress; blocked honestly rather than looping.';
+      contract.openProblems.push(`Stalled: repeated ${this.lastStallClass} stalls on ${this.stallStop?.tool ?? 'repeated calls'} — recovery exhausted after two coordinator actions.`);
+      bumpInPlace(contract);
+      this.cfg.onContractUpdate?.(contract);
+    }
+    this.recovery.noteTurn(true, 0); // reset pressure for the resumed run
+    this.recovery.postExhaustionProgress();
+    this.exhaustedNotified.clear();
+    this.emit({ type: 'stalled', message: note.split('\n')[0] });
+    this.stallStop = null;
+    return { content: '', note };
+  }
+
   private async runOneCall(call: { id: string; name: string; args?: unknown }, messageId: string | null): Promise<{ finished: boolean; finalContent: string; entry: ToolLogEntry; name: string }> {
     this.emit({ type: 'tool_start', call: { id: call.id, name: canonicalToolName(call.name), args: normalizeToolArgs(call.name, call.args).args } });
     const { entry, args, name } = await this.executeCall(call.name, call.args, call.id);
+    // Transport protection (spec §1): a huge/truncated raw payload must not be
+    // re-sent to the model in every later turn — cap it in the HISTORY (the
+    // tool entry keeps the diagnostic preview).
+    if ((entry.parse === 'truncated' || entry.parse === 'failed') && typeof call.args === 'string' && call.args.length > 800) {
+      call.args = { _raw: `${call.args.slice(0, 500)}…[${call.args.length} chars — capped in history; the call was NOT executed]` };
+    }
     this.emit({ type: 'tool_end', call: { id: call.id, name, args }, entry });
     if (messageId === 'wire') {
       this.messages.push({ role: 'tool', toolCallId: call.id || name, name, content: capOutput(entry.output || '') });
@@ -537,7 +795,19 @@ export class AgentRunner {
   }
 
   private toWire(): any[] {
+    // Context protection + envelope dedup: each coordinator recovery envelope
+    // is delivered to the model in EXACTLY ONE payload (the turn it was
+    // injected for). Later payloads carry a short marker instead — the
+    // guidance was already delivered; re-sending copies would bloat every
+    // subsequent turn without adding information.
+    const sentEnvelopes = this.sentEnvelopes;
     const wire = this.messages.map((m) => {
+      if (m.role === 'user' && typeof m.content === 'string' && (m.content.startsWith('[COORDINATOR RECOVERY') || m.content.startsWith('[COORDINATOR — RECOVERY EXHAUSTED]'))) {
+        if (sentEnvelopes.has(m.content)) {
+          return { role: 'user', content: '[Coordinator recovery guidance was delivered earlier — follow it. Do not repeat the blocked call.]' };
+        }
+        sentEnvelopes.add(m.content);
+      }
       if (m.role === 'assistant' && m.toolCalls?.length) {
         return {
           role: 'assistant',
@@ -584,7 +854,7 @@ export class AgentRunner {
   }
 
   private wireTools() {
-    return this.cfg.tools.map((t) => ({
+    return this.toolsForRun().map((t) => ({
       type: 'function' as const,
       function: {
         name: t.name,
@@ -658,6 +928,7 @@ export class AgentRunner {
     let finalNote: string | undefined;
     let hitTurnLimit = false;
     let paused = false;
+    let stalledOut = false;
 
     while (turn < maxTurns) {
       turn++;
@@ -679,13 +950,37 @@ export class AgentRunner {
 
       // Problem A: drain user steering FIRST — applied promptly, never lost
       // behind retries or blocks.
+      this.lastBoundaryHadManual = false;
+      this.boundariesSinceManual++;
       if (this.steeringQueue.length) {
         const notes = this.steeringQueue.splice(0, this.steeringQueue.length);
+        this.lastBoundaryHadManual = true;
+        this.boundariesSinceManual = 0;
         this.messages.push({
           role: 'user',
-          content: `[USER STEERING — HIGHEST PRIORITY, applies immediately]\n${notes.map((n) => `- ${n}`).join('\n')}\nAcknowledge briefly and follow it now; it overrides earlier instructions and the current approach.`,
+          content: `[USER STEERING]\n(Highest priority — applies immediately)\n${notes.map((n) => `- ${n}`).join('\n')}\nAcknowledge briefly and follow it now; it overrides earlier instructions and the current approach.`,
         });
         this.emit({ type: 'steering_applied', message: `User steering applied: ${notes.map((n) => n.slice(0, 80)).join(' | ')}` });
+      }
+      // Milestone 4: automatic steering arrives AFTER manual steering —
+      // never interleaved in the same boundary, never discarded. Manual
+      // delivery this turn defers the automatic queue to the next boundary.
+      // Deliver automatic notes only at a boundary WITHOUT fresh manual
+      // steering, or once they have waited at least one full boundary.
+      this.recovery.tickAutoPending();
+      // Automatic guidance waits for a clean boundary: it goes out only when
+      // NO manual steering was delivered here and at least one boundary has
+      // passed since the last manual delivery (manual always wins priority).
+      const manualJustDelivered = this.lastBoundaryHadManual;
+      this.lastBoundaryHadManual = false;
+      if (!manualJustDelivered && this.boundariesSinceManual >= 2) {
+        const autoNotes = this.recovery.drainAutoSteering();
+        if (autoNotes.length) {
+          for (const a of autoNotes) {
+            this.messages.push({ role: 'user', content: `[AUTOMATIC STEERING]\n${a.text}\nAcknowledge briefly and adjust your approach now.` });
+            this.emit({ type: 'steering_applied', message: `Automatic steering delivered (${a.trigger}).` });
+          }
+        }
       }
 
       let streamedText = '';
@@ -760,6 +1055,7 @@ export class AgentRunner {
       if (endChunk?.usage) this.emit({ type: 'usage', usage: endChunk.usage });
 
       const nativeCalls = endChunk?.toolCalls?.length ? endChunk.toolCalls : [];
+      let turnProgress = false;
 
       if (usedNative && nativeCalls.length) {
         // native tool path (cap parallel calls per turn as a guardrail)
@@ -771,7 +1067,9 @@ export class AgentRunner {
         this.noteDialect('native');
         let stop = false;
         for (const call of calls) {
-          const r = await this.runOneCall({ id: call.id, name: call.name, args: call.args }, 'wire');
+          const r = await this.runOneCall(call, 'wire');
+          if (callProgressed(r.entry)) turnProgress = true;
+          if (this.stallStop) break;
           if (r.finished) {
             const gate = await this.handleFinish(r);
             if (gate.accepted) { finalContent = r.finalContent; if (gate.note) finalNote = gate.note; stop = true; break; }
@@ -780,21 +1078,48 @@ export class AgentRunner {
           }
         }
         if (stop) break;
+        if (this.stallStop) {
+          const stalled = this.finalizeStalled();
+          finalNote = stalled.note;
+          stalledOut = true;
+          break;
+        }
+        this.recovery.noteTurn(turnProgress, turn);
+        if (this.checkActivityStall()) {
+          const stalled = this.finalizeStalled();
+          finalNote = stalled.note;
+          stalledOut = true;
+          break;
+        }
         continue;
       }
 
       // text protocol path (or plain final answer) — Part 2: the dialect
-      // ladder accepts json, tagged (<tool_call>…), and pythonic call syntax;
+      // ladder accepts json, tagged (…), and pythonic call syntax;
       // conversational prose without tool intent stays prose.
       const action = detectToolDialect(streamedText);
       if (action) this.noteDialect(action.dialect);
       if (!usedNative && action) {
         this.messages.push({ role: 'assistant', content: streamedText });
         const r = await this.runOneCall({ id: `fb_${turn}`, name: action.action.tool, args: action.action.args }, null);
+        if (callProgressed(r.entry)) turnProgress = true;
+        if (this.stallStop) {
+          const stalled = this.finalizeStalled();
+          finalNote = stalled.note;
+          stalledOut = true;
+          break;
+        }
         if (r.finished) {
           const gate = await this.handleFinish(r);
           if (gate.accepted) { finalContent = r.finalContent; finalNote = gate.note; break; }
           continue;
+        }
+        this.recovery.noteTurn(turnProgress, turn);
+        if (this.checkActivityStall()) {
+          const stalled = this.finalizeStalled();
+          finalNote = stalled.note;
+          stalledOut = true;
+          break;
         }
         continue;
       }
@@ -824,10 +1149,24 @@ export class AgentRunner {
         this.emit({ type: 'notice', message: `Model emitted its tool call as text (${textAction.dialect} dialect) — executing ${canonicalToolName(textAction.action.tool)}.` });
         this.messages.push({ role: 'assistant', content: streamedText });
         const r = await this.runOneCall({ id: `nt_${turn}`, name: textAction.action.tool, args: textAction.action.args }, null);
+        if (callProgressed(r.entry)) turnProgress = true;
+        if (this.stallStop) {
+          const stalled = this.finalizeStalled();
+          finalNote = stalled.note;
+          stalledOut = true;
+          break;
+        }
         if (r.finished) {
           const gate = await this.handleFinish(r);
           if (gate.accepted) { finalContent = r.finalContent; finalNote = gate.note; break; }
           continue;
+        }
+        this.recovery.noteTurn(turnProgress, turn);
+        if (this.checkActivityStall()) {
+          const stalled = this.finalizeStalled();
+          finalNote = stalled.note;
+          stalledOut = true;
+          break;
         }
         continue;
       }
@@ -859,7 +1198,7 @@ export class AgentRunner {
     }
 
     this.emit({ type: 'final', content: finalContent, turns: turn, note: finalNote, canContinue: hitTurnLimit || paused, completion: this.lastCompletion });
-    return { content: finalContent, turns: turn, note: finalNote, messages: this.messages, hitTurnLimit, paused, completion: this.lastCompletion };
+    return { content: finalContent, turns: turn, note: finalNote, messages: this.messages, hitTurnLimit, paused, completion: this.lastCompletion, filesChanged: [...this.filesWritten], usage: this.usageTotal, stalled: stalledOut };
   }
 
   // finish handling with the completion gate (Problem D). Returns accepted +
@@ -918,6 +1257,28 @@ function capOutput(s: string) {
   return s.length > TOOL_OUTPUT_CAP ? s.slice(0, TOOL_OUTPUT_CAP) + '\n...[truncated]' : s;
 }
 
+// Milestone 4: what counts as MEASURABLE progress for stall classification —
+// successful writes/edits, passing verification, real state changes. Reads
+// and blocked calls are activity, never progress.
+function callProgressed(entry: ToolLogEntry): boolean {
+  if (entry.status !== 'ok' || entry.outcome === 'blocked') return false;
+  // An exit-0 command with EMPTY output (e.g. `true`, `cd x`) is forward motion
+  // for the stall clock only: the hard per-agent turn limit stays the safety
+  // net, and the repetition guard below does not block it either. Discovery
+  // loops (nonempty outputs, errors) still count as stalls (Phase 2 tests).
+  if (entry.outcome === 'ok-empty' && FS_MAYBE_WRITERS.has(entry.tool)) return true;
+  // Measurable progress = real state changes or PASSING verification. The
+  // FS_MAYBE_WRITERS branch marks commands fsChanged=true for journaling, so
+  // progress must classify by TOOL here: a bare `ls -la` success is activity
+  // (otherwise a command cycle would reset the stall clock forever).
+  if (entry.tool === 'run_tests' || entry.tool === 'run_build') {
+    return exitFromOutput(entry.output || '') === 0;
+  }
+  if (entry.tool === 'install_dependencies') return true;
+  if (FS_MAYBE_WRITERS.has(entry.tool)) return false;
+  return entry.fsChanged === true;
+}
+
 // Deterministic signature for the repetition guard: sorted keys, so
 // {path,find} and {find,path} are the same call.
 function stableArgs(args: Record<string, any>): string {
@@ -935,6 +1296,21 @@ function stableArgs(args: Record<string, any>): string {
 // are successful results that carry no new information — the journal records
 // them as ok-empty so recovery guidance can say so explicitly.
 function classifyEmpty(tool: string, output: string): 'ok-empty' | 'ok-nonempty' {
+  // Commands: exit 0 with NO stdout content is a genuinely empty success
+  // (`true`, `cd x`) — distinct from a discovery command that returned data.
+  if (tool === 'run_command' || tool === 'launch_app') {
+    const exit = exitFromOutput(output);
+    if (exit === 0) {
+      const body = output
+        .replace(/^exit code: .*$/gim, '')
+        .replace(/^cwd: .*$/gim, '')
+        .replace(/^duration: .*$/gim, '')
+        .replace(/^\$ .*$/gim, '')
+        .replace(/^\[Timed out[^\]]*\]$/gim, '')
+        .trim();
+      if (!body) return 'ok-empty';
+    }
+  }
   if (READ_TOOLS.has(tool) || tool === 'run_tests') {
     if (/^\(empty directory|^EMPTY:|^MISSING:|^No matches|^No detached processes|^No entries returned|No test command could be auto-detected|^No dependency manifest/.test(output.trim())) {
       return 'ok-empty';
