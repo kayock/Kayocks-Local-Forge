@@ -80,7 +80,9 @@ export function createBunPtyBackend() {
                   stdin: 'ignore', stdout: 'ignore', stderr: 'ignore', windowsHide: true,
                 });
                 void Promise.resolve(interrupt.exited).then((code) => {
-                  if (code !== 0) {
+                  if (code === 10) {
+                    console.warn('LocalForge PTY: Ctrl+C required terminating an unresponsive foreground child; interactive shell preserved');
+                  } else if (code !== 0) {
                     console.warn('LocalForge PTY: native Ctrl+C helper failed (' + code + '); falling back to ETX');
                     try { terminal.write(bytes); } catch {}
                   }
