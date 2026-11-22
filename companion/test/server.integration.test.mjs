@@ -12,6 +12,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import http from 'node:http';
 
 let server = null;
@@ -83,7 +84,7 @@ before(async () => {
   const port = 23380 + Math.floor(Math.random() * 200);
   base = `http://127.0.0.1:${port}`;
   server = spawn(process.execPath, ['src/server.js', '--port', String(port), '--home', home, '--no-browser-hint'], {
-    cwd: path.resolve(new URL('.', import.meta.url).pathname, '..'),
+    cwd: fileURLToPath(new URL('..', import.meta.url)),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   // wait for the health endpoint to answer
@@ -188,7 +189,7 @@ test('REAL exec: echo runs and reports exit code 0 with captured stdout', async 
 });
 
 test('REAL exec: non-zero exits are reported truthfully', async () => {
-  const r = await req('POST', `/api/ws/${wsId}/exec`, { body: { cmd: 'sh -c "exit 3"', confirm: true } });
+  const r = await req('POST', `/api/ws/${wsId}/exec`, { body: { cmd: process.platform === 'win32' ? 'exit /b 3' : 'sh -c "exit 3"', confirm: true } });
   assert.equal(r.status, 200, JSON.stringify(r.json));
   assert.equal(r.json.exitCode, 3);
 });

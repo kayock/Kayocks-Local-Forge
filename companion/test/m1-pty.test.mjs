@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 
@@ -18,7 +19,7 @@ function startCompanion() {
   const wsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lf-m1-ws-'));
   fs.writeFileSync(path.join(wsRoot, 'hello.txt'), 'alpha\nbeta\ngamma\n');
   const child = spawn(process.execPath, ['src/server.js', '--port', String(PORT), '--home', home, '--workspace', wsRoot, '--lan', '--no-browser-hint'], {
-    cwd: path.join(path.dirname(new URL(import.meta.url).pathname), '..'),
+    cwd: fileURLToPath(new URL('..', import.meta.url)),
     env: { ...process.env, LOCALFORGE_VERBOSE: '1' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -118,16 +119,24 @@ describe('Milestone 1 — PTY terminal', () => {
 
     const events = sseCollect(`/api/ws/${wsId}/pty/output?sessionId=${sessionId}`, 6000);
     await new Promise((r) => setTimeout(r, 400));
-    // cd + export in one command, then a SEPARATE input that proves state persisted
-    await req('POST', `/api/ws/${wsId}/pty/input`, { sessionId, data: 'cd /tmp && export LF_PTY_PROBE=ptyworks\n' });
+    // Preserve cwd and environment across separate inputs using the native
+    // shell: Windows ConPTY launches cmd.exe; POSIX uses a login shell.
+    const isWindows = process.platform === 'win32';
+    const firstInput = isWindows
+      ? 'cd /d C:\\Windows && set LF_PTY_PROBE=ptyworks\r\n'
+      : 'cd /tmp && export LF_PTY_PROBE=ptyworks\n';
+    const secondInput = isWindows
+      ? 'echo cwd=%CD% env=%LF_PTY_PROBE%\r\n'
+      : 'echo "cwd=$(pwd) env=$LF_PTY_PROBE"\n';
+    await req('POST', `/api/ws/${wsId}/pty/input`, { sessionId, data: firstInput });
     await new Promise((r) => setTimeout(r, 1200));
-    await req('POST', `/api/ws/${wsId}/pty/input`, { sessionId, data: 'echo "cwd=$(pwd) env=$LF_PTY_PROBE"\n' });
+    await req('POST', `/api/ws/${wsId}/pty/input`, { sessionId, data: secondInput });
     await new Promise((r) => setTimeout(r, 1500));
     const evs = await events;
     const allOut = evs.filter((e) => e.t === 'out').map((e) => e.d).join('');
     assert.ok(allOut.includes('env=ptyworks'), `environment did not persist across inputs. Output: ${JSON.stringify(allOut.slice(-600))}`);
-    assert.ok(allOut.includes('cwd=/tmp'), `cwd did not persist. Output: ${JSON.stringify(allOut.slice(-600))}`);
-
+    assert.ok(isWindows ? /cwd=C:\\Windows/i.test(allOut) : allOut.includes('cwd=/tmp'),
+      `cwd did not persist. Output: ${JSON.stringify(allOut.slice(-600))}`);
     // resize is accepted
     const rz = await req('POST', `/api/ws/${wsId}/pty/resize`, { sessionId, cols: 120, rows: 40 });
     assert.equal(rz.status, 200);
@@ -164,7 +173,7 @@ describe('Milestone 1 — diff preview + overwrite protection + exec log', () =>
     wsRoot2 = fs.mkdtempSync(path.join(os.tmpdir(), 'lf-m1-wsdiff-'));
     fs.writeFileSync(path.join(wsRoot2, 'app.js'), 'function main() {\n  console.log("v1");\n}\n');
     proc2 = spawn(process.execPath, ['src/server.js', '--port', String(port2), '--home', home2, '--workspace', wsRoot2, '--lan', '--no-browser-hint'], {
-      cwd: path.join(path.dirname(new URL(import.meta.url).pathname), '..'), stdio: ['ignore', 'pipe', 'pipe'],
+      cwd: fileURLToPath(new URL('..', import.meta.url)), stdio: ['ignore', 'pipe', 'pipe'],
     });
     await new Promise(async (resolve, reject) => {
       const t0 = Date.now();

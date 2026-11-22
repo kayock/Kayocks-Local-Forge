@@ -6,10 +6,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 
-const COMPANION_DIR = path.join(path.dirname(new URL(import.meta.url).pathname), '..');
+const COMPANION_DIR = fileURLToPath(new URL('..', import.meta.url));
 
 function boot({ home, wsRoot, port }) {
   const proc = spawn(process.execPath, ['src/server.js', '--port', String(port), '--home', home, '--workspace', wsRoot, '--lan', '--no-browser-hint'], {

@@ -55,10 +55,12 @@ function makeStoreZip(members) {
 }
 
 test('resolveInWorkspace jails paths inside the workspace root', () => {
-  const ws = { path: '/tmp/ws-root' };
-  assert.equal(resolveInWorkspace(ws, 'a/b.txt'), path.resolve('/tmp/ws-root', 'a/b.txt'));
+  // Exercise the same path jail assertions with real absolute paths on both OSes.
+  const root = path.resolve(os.tmpdir(), 'lf-ws-root');
+  const ws = { path: root };
+  assert.equal(resolveInWorkspace(ws, 'a/b.txt'), path.join(root, 'a', 'b.txt'));
   assert.throws(() => resolveInWorkspace(ws, '../escape.txt'), FsError);
-  assert.throws(() => resolveInWorkspace(ws, '/etc/passwd'), FsError);
+  assert.throws(() => resolveInWorkspace(ws, path.resolve(root, '..', 'outside.txt')), FsError);
 });
 
 test('statPath distinguishes missing from empty from non-empty', async () => {

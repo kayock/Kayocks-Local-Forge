@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import {
@@ -160,7 +161,7 @@ test('/api/chat emits keepalive frames while the model server is silent, then co
   const base = `http://127.0.0.1:${port}`;
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'lf-timeout-int-'));
   const server = spawn(process.execPath, ['src/server.js', '--port', String(port), '--home', home, '--no-browser-hint'], {
-    cwd: path.resolve(new URL('.', import.meta.url).pathname, '..'),
+    cwd: fileURLToPath(new URL('..', import.meta.url)),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   try {
