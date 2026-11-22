@@ -1,0 +1,7 @@
+upstream: first byte after 375000 ms (past the old ~300 s kill point)
+elapsed: 375s; frames: 27; keepalives: 25; errors: 0; ends: 1
+PASS — no error frames (no false outage)
+PASS — keepalive frames during silence
+PASS — text content streamed fully
+PASS — exactly one end frame
+PASS — exactly one upstream request (no duplicate retry)

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8b5cf6"/>
+      <stop offset="1" stop-color="#a855f7"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="#17171c"/>
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="none" stroke="url(#g)" stroke-width="2.5"/>
+  <!-- anvil-ish forge mark / terminal caret -->
+  <path d="M14 24h36l-8 9h-9v7l7 8H24l7-8v-7h-9l-8-9z" fill="url(#g)"/>
+  <rect x="27" y="14" width="10" height="4" rx="1" fill="#c4b5fd"/>
+</svg>

@@ -1,0 +1,32 @@
+body {
+    background-color: #111;
+    color: #fff;
+}
+
+ul {
+    list-style-type: none;
+    padding: 0;
+}
+
+li {
+    background-color: #333;
+    margin: 5px 0;
+    padding: 10px;
+    border-radius: 5px;
+}
+
+button {
+    background-color: #666;
+    color: #fff;
+    border: none;
+    padding: 5px 10px;
+    cursor: pointer;
+}
+
+input {
+    padding: 5px;
+    width: 200px;
+    margin-right: 10px;
+}
+
+/* Add more styles as needed */

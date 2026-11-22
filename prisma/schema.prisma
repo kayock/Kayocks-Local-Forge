@@ -1,0 +1,125 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  // Supplied by the environment (dev: .env → file:<project>/db/custom.db;
+  // deployed runtime: file:/app/db/custom.db). Must NOT be hardcoded: Prisma
+  // resolves relative file: URLs against the schema directory, which breaks
+  // the deployment pipeline's runtime database step.
+  url      = env("DATABASE_URL")
+}
+
+// ============ LocalForge hosted platform schema ============
+// The hosted service stores ONLY account, billing and project-metadata data.
+// Source code and model prompts never reach the hosted backend: they live on
+// the customer's machine, accessed through the LocalForge companion.
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         String   @default("user") // user | admin
+  prefs        String?  // JSON blob: editor prefs, default policy, etc.
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  sessions      Session[]
+  projects      Project[]
+  subscription  Subscription?
+  usageEvents   UsageEvent[]
+  teamMemberships TeamMember[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  tokenHash String   @unique // sha256 of the opaque cookie token
+  userAgent String?
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// Project metadata only (name, local path label, device label).
+// No file contents, no transcripts.
+model Project {
+  id             String   @id @default(cuid())
+  userId         String
+  name           String
+  description    String?
+  localPath      String?  // label of the folder on the customer's machine
+  companionLabel String?  // companion device label it lives on
+  createdAt      DateTime @default(now())
+  lastOpenedAt   DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Subscription {
+  id                 String   @id @default(cuid())
+  userId             String   @unique
+  tier               String   @default("free") // free | pro | team
+  status             String   @default("active") // active | past_due | canceled | trialing
+  stripeCustomerId   String?
+  stripeSubscriptionId String?
+  currentPeriodEnd   DateTime?
+  cancelAtPeriodEnd  Boolean  @default(false)
+  updatedAt          DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// Hosted-service usage analytics (API calls against the hosted backend only —
+// never inference tokens, which run on the customer's own hardware).
+model UsageEvent {
+  id        String   @id @default(cuid())
+  userId    String
+  kind      String // e.g. "agent_run", "project_open", "ide_session"
+  metaJson  String? // small JSON metadata
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, kind])
+}
+
+// Team management foundation (Phase 4).
+model Team {
+  id        String   @id @default(cuid())
+  name      String
+  ownerId   String
+  createdAt DateTime @default(now())
+
+  members TeamMember[]
+}
+
+model TeamMember {
+  id     String @id @default(cuid())
+  teamId String
+  userId String
+  role   String @default("member") // owner | admin | member
+
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, userId])
+  @@index([userId])
+}
+
+// Raw Stripe webhook events, kept for reconciliation when billing activates.
+model BillingWebhookEvent {
+  id           String   @id @default(cuid())
+  stripeEventId String  @unique
+  type         String
+  payloadJson  String
+  receivedAt   DateTime @default(now())
+  processed    Boolean  @default(false)
+}

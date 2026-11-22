@@ -1,0 +1,33 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{background:#17171c;margin:0;padding:16px}</style></head><body>
+<pre class="mermaid">
+flowchart LR
+    subgraph Browser["Customer's browser"]
+        UI["LocalForge IDE (Next.js SPA)\nMonaco · Explorer · Agent chat\nTerminal · Preview · Tool log"]
+        AR["Agent runtime (TS)\ntool loop · native + text protocol\napprovals · orchestration"]
+    end
+    subgraph CustomerMachine["Customer's machine"]
+        C["LocalForge Companion (Node.js)\npairing · path-jailed FS tools\nshell exec · streaming terminal\nprovider proxy · preview server"]
+        M1["Ollama :11434"]
+        M2["LM Studio :1234"]
+        M3["llama-server :8080"]
+        M4["Lemonade :8000"]
+        WS["Authorized workspace\n(project folder)"]
+    end
+    subgraph Hosted["Hosted platform (our servers)"]
+        B["Next.js API routes\nauth · sessions · project metadata\nbilling scaffold · usage events"]
+        DB[("SQLite / Postgres\nusers · sessions · projects\nsubscriptions · usage")]
+    end
+    UI <--> AR
+    AR -- "REST + NDJSON streams (token auth)" --> C
+    UI -- "iframe" --> C
+    C --> M1
+    C --> M2
+    C --> M3
+    C --> M4
+    C <--> WS
+    UI -- "metadata only (sessions cookie)" --> B
+    B --- DB
+</pre>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({startOnLoad:true, theme:'dark', themeVariables:{primaryColor:'#8b5cf6', background:'#17171c'}});</script>
+</body></html>

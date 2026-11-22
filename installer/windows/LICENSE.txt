@@ -1,0 +1,16 @@
+LocalForge Companion — Windows installer
+Copyright (c) LocalForge contributors. MIT License.
+
+This installer ships the LocalForge companion (a local service that connects
+the LocalForge IDE in your browser to your own files, terminals and AI model
+servers) together with its tray application.
+
+The companion runs entirely on YOUR computer:
+- It binds to 127.0.0.1 (localhost) only — other machines cannot connect.
+- Your files, prompts, tool results and inference traffic stay local.
+- Nothing is installed besides the two executables in the install folder;
+  settings and logs live in %LOCALAPPDATA%\LocalForgeCompanion.
+
+Third-party components are covered by their own licenses; the full list is in
+the project repository (docs/LICENSES.md). The Bun runtime (MIT) is embedded
+in localforge-companion.exe; the tray app is statically linked native code.

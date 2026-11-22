@@ -1,0 +1,81 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (never commit actual local settings or credentials)
+.env*
+!.env.example
+!companion/.env.example
+
+# vercel
+.vercel
+
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+local-*
+.claude
+.z-ai-config
+*.log
+dev.log
+dev.out.log
+test
+# companion tests are tracked (unit + real-server integration)
+!/companion/test/
+prompt
+
+server.log
+# Skills directory
+/skills/
+# local build toolchain and packaging intermediates (re-buildable)
+.build-tools/
+*.pdb
+download/linux/deb-root/
+download/linux/localforge-companion-*-linux-x64/
+.foreign-quarantine/
+
+# heavy local deliverables & tooling — keep out of deploys
+/download/
+/.build-tools/
+/.foreign-quarantine/
+e2e-report.json
+dev.log
+server.log
+server-watchdog.log
+.watchdog.pid
+
+# Runtime account/session SQLite data must never be committed or shipped.
+/db/*.db
+/db/*.db-*
+/db/*.sqlite*
+/prisma/*.db
+/prisma/*.sqlite*

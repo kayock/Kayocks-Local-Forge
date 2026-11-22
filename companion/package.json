@@ -1,0 +1,29 @@
+{
+  "name": "@localforge/companion",
+  "version": "0.4.4",
+  "description": "LocalForge IDE local companion: connects the browser IDE to local AI models, project files, terminals and builds on the customer's own machine.",
+  "type": "module",
+  "main": "src/server.js",
+  "bin": {
+    "localforge-companion": "src/server.js"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/companion.test.mjs test/server.integration.test.mjs test/inference-timeout.test.mjs test/fs-boundary.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "keywords": [
+    "localforge",
+    "ide",
+    "ai",
+    "ollama",
+    "lm-studio",
+    "llama.cpp"
+  ],
+  "license": "MIT"
+}
