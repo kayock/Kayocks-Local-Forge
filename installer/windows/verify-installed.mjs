@@ -115,9 +115,10 @@ ok('installer artifact present', !!setupExe, `no Setup exe in ${distDir}`);
 ok('companion exe installed', fs.existsSync(path.join(APP_DIR, 'localforge-companion.exe')), APP_DIR);
 ok('tray exe installed at the correct path', fs.existsSync(path.join(APP_DIR, 'LocalForgeTray.exe')), APP_DIR);
 const ptyNodeCandidates = [
-  path.join(APP_DIR, 'pty-sidecar', 'node-pty', 'build', 'Release', 'pty.node'),
+  path.join(APP_DIR, 'pty-sidecar', 'node-pty', 'prebuilds', 'win32-x64', 'conpty.node'),
+  path.join(APP_DIR, 'pty-sidecar', 'node-pty', 'prebuilds', 'win32-x64', 'pty.node'),
   path.join(APP_DIR, 'pty-sidecar', 'node-pty', 'build', 'Release', 'conpty.node'),
-  path.join(APP_DIR, 'pty-sidecar', 'node-pty', 'build', 'Release', 'winpty.dll'),
+  path.join(APP_DIR, 'pty-sidecar', 'node-pty', 'build', 'Release', 'pty.node'),
 ];
 const nativePtyFile = ptyNodeCandidates.find((p) => fs.existsSync(p));
 ok('native PTY binary inside the installer sidecar', !!nativePtyFile, `none of ${ptyNodeCandidates.join(', ')}`);

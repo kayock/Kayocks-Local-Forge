@@ -47,14 +47,13 @@ jobs:
           choco install nsis mingw -y --no-progress
           echo "C:\Program Files (x86)\NSIS" >> "$GITHUB_PATH"
 
-      - name: Install companion dependencies (REAL Windows node-pty build)
+      - name: Install companion dependencies and verify native Windows PTY
         working-directory: companion
         run: |
-          npm install --no-audit --no-fund 2>&1 | tee npm-install.log
-          test -f node_modules/node-pty/build/Release/pty.node || test -f node_modules/node-pty/build/Release/conpty.node || {
-            echo "FAIL: node-pty native binary was not built for Windows"; exit 1;
-          }
-          ls -la node_modules/node-pty/build/Release/
+          # node-pty 1.1.x may ship Windows prebuilt addons in prebuilds/win32-x64;
+          # a valid installation need not have build/Release.
+          npm install --include=optional --foreground-scripts --no-audit --no-fund 2>&1 | tee npm-install.log
+          node ../installer/windows/assert-native-pty.mjs
 
       - name: Companion test suite on native Windows (includes live PTY)
         working-directory: companion
@@ -106,6 +105,17 @@ jobs:
           sha256sum "LocalForge-Companion-Setup-$LF_VER.exe" > SHA256SUMS.txt
           cat SHA256SUMS.txt
           echo "NOTE: this installer is UNSIGNED (no code-signing certificate configured)"
+
+      # Keep install logs even if an earlier build step fails and verify-installed never runs.
+      - name: Upload Windows installer build logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer-build-diagnostics
+          path: |
+            companion/npm-install.log
+            download/windows/payload-hashes.log
+          if-no-files-found: ignore
 
       - uses: actions/upload-artifact@v4
         with:
