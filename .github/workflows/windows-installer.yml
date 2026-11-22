@@ -54,7 +54,7 @@ jobs:
         run: |
           echo "Starting Windows npm dependency install: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
           echo "Node: $(node --version); npm: $(npm --version)"
-          echo "Platform: $(node -p 'process.platform + \"/\" + process.arch')"
+          echo "Platform: $(node -p 'process.platform + "/" + process.arch')"
           echo "npm ignore-scripts: $(npm config get ignore-scripts)"
           echo "Installing optional native PTY module; this step has a strict 10-minute limit."
           npm install --include=optional --foreground-scripts --no-audit --no-fund --timing --loglevel=verbose 2>&1 | tee npm-install.log
@@ -65,7 +65,8 @@ jobs:
         timeout-minutes: 2
         run: |
           echo "node-pty native files on disk:"
-          find node_modules/node-pty -type f \\( -name '*.node' -o -name 'package.json' \\) | tee node-pty-paths.log
+          find node_modules/node-pty -type f -name '*.node' | tee node-pty-paths.log
+          test -s node-pty-paths.log || { echo "FAIL: npm did not install a native node-pty addon"; exit 1; }
           echo "Running real Windows shell PTY smoke test (2-minute job-step limit)"
           node ../installer/windows/assert-native-pty.mjs 2>&1 | tee pty-probe.log
           echo "Native Windows PTY probe passed"
