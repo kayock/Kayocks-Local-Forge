@@ -15,16 +15,16 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "LocalForge IDE — Your models. Your machine. Your IDE.",
+  title: "LocalForge — AI Development Across Your Own Machines",
   description:
-    "Browser-based AI coding IDE that connects to your own locally running language models (Ollama, LM Studio, llama.cpp, Lemonade). Files, agents and inference stay on your machine.",
+    "Build, coordinate, and execute AI-assisted development workflows across your own computers. Projects, coding agents, local models, and distributed execution stay in one workspace.",
   keywords: ["LocalForge", "AI IDE", "local AI", "Ollama", "LM Studio", "llama.cpp", "coding agent"],
   icons: {
     icon: "/logo.svg",
   },
   openGraph: {
-    title: "LocalForge IDE",
-    description: "Your models. Your machine. Your IDE.",
+    title: "LocalForge — AI Development Across Your Own Machines",
+    description: "AI-assisted development across your own computers, with local models and distributed execution.",
     type: "website",
   },
 };

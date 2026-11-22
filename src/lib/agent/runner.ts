@@ -40,7 +40,7 @@ import type {
   ToolProtocolMode,
   ToolLogEntry,
 } from './types';
-import { normalizeProtocolMode, toolResultMessage, FALLBACK_NUDGE } from './protocol';
+import { normalizeProtocolMode, toolResultMessage, FALLBACK_NUDGE, FALLBACK_PROTOCOL_ADDON } from './protocol';
 import { normalizeToolArgs, validateToolArgs, canonicalToolName, summarizeError, canonRelPath } from './tools';
 import { parseToolCallArgs } from './toolargs';
 import { detectToolDialect, type ToolDialect } from './dialects';
@@ -257,6 +257,23 @@ export class AgentRunner {
       this.cfg.contract.steering.push({ text: t, at: Date.now() });
       this.cfg.onContractUpdate?.(this.cfg.contract);
     }
+  }
+
+  // Text mode does not send an OpenAI tools array. The model only knows a
+  // tool exists if this catalog is in the prompt. Without it, small models
+  // reply that write_file is unavailable even though the executor has it.
+  private textProtocolBlock(): string {
+    const catalog = this.toolsForRun().map((t) => {
+      const params = t.params.map((p) => `${p.name}${p.required ? '' : '?'}`).join(', ');
+      return `- ${t.name}(${params}): ${t.description}`;
+    }).join('\n');
+    return `${FALLBACK_PROTOCOL_ADDON}\n\nTOOLS AVAILABLE IN THIS RUN (these tools are installed and will be executed; do not claim a listed tool is unavailable):\n${catalog}`;
+  }
+
+  private ensureTextProtocol(): void {
+    const sys = this.messages.find((m) => m.role === 'system');
+    if (!sys || sys.content.includes('TOOLS AVAILABLE IN THIS RUN')) return;
+    sys.content = `${sys.content}\n\n${this.textProtocolBlock()}`;
   }
 
   // The text-protocol helper (nudges + JSON contract) must only engage where
@@ -922,6 +939,7 @@ export class AgentRunner {
       ...(cfg.contextMessages || []),
       { role: 'user', content: cfg.task },
     ];
+    if (this.protocol === 'text') this.ensureTextProtocol();
 
     let turn = 0;
     let finalContent = '';
@@ -1033,6 +1051,7 @@ export class AgentRunner {
             const from = this.protocol;
             this.fellBack = true;
             this.protocol = 'text';
+            this.ensureTextProtocol();
             this.emit({ type: 'mode_change', from, to: this.protocol, reason: `Server rejected native tool calling: ${msg.slice(0, 200)}` });
             turn--; // retry this turn under the text protocol
             continue;

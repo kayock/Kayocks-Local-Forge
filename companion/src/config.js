@@ -5,17 +5,20 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 
-// One product identity: companion/package.json. `version` stays a numeric
-// semver for installers; `localforgeRelease` is what running components report.
+// One product identity: companion/package.json. `version` is the numeric
+// semver installers and the Windows executable report. `localforgeRelease`
+// is what a source checkout reports (for example a release candidate).
+// The Windows compile passes LOCALFORGE_COMPANION_VERSION so the bundled
+// executable does not depend on a package.json that bun does not ship
+// beside the binary — that missing file is why older builds stayed on 0.4.5.
+import pkg from '../package.json' with { type: 'json' };
+
 function productVersion() {
-  try {
-    const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-    const release = typeof pkg.localforgeRelease === 'string' ? pkg.localforgeRelease.trim() : '';
-    const version = typeof pkg.version === 'string' ? pkg.version.trim() : '';
-    return release || version || '0.0.0';
-  } catch {
-    return '0.0.0';
-  }
+  const embedded = process.env.LOCALFORGE_COMPANION_VERSION;
+  if (typeof embedded === 'string' && embedded.trim()) return embedded.trim();
+  const release = typeof pkg.localforgeRelease === 'string' ? pkg.localforgeRelease.trim() : '';
+  const version = typeof pkg.version === 'string' ? pkg.version.trim() : '';
+  return release || version || '0.0.0';
 }
 
 export const VERSION = productVersion();

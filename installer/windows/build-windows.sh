@@ -60,7 +60,8 @@ echo "== 1/4 companion.exe (bun --compile, windows-x64) =="
 bun build installer/windows/entry-companion.ts \
   --compile --target=bun-windows-x64 \
   --outfile "$OUT/LocalForgeCompanion/localforge-companion.exe" \
-  --define 'process.env.NODE_ENV:"production"'
+  --define 'process.env.NODE_ENV:"production"' \
+  --define "process.env.LOCALFORGE_COMPANION_VERSION:\"${VER}\""
 
 echo "== 2/4 tray GUI (zig cc, windows-x64) =="
 "$ZIG" cc -target x86_64-windows-gnu -O2 -Wno-unused-function \

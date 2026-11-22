@@ -85,7 +85,8 @@ jobs:
           bun build installer/windows/entry-companion.ts \
             --compile --target=bun-windows-x64 \
             --outfile download/windows/LocalForgeCompanion/localforge-companion.exe \
-            --define 'process.env.NODE_ENV:"production"'
+            --define 'process.env.NODE_ENV:"production"' \
+            --define "process.env.LOCALFORGE_COMPANION_VERSION:\"${VER}\""
           test -f download/windows/LocalForgeCompanion/localforge-companion.exe || {
             echo "FAIL: companion exe was not produced"; exit 1;
           }
