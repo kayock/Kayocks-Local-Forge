@@ -209,7 +209,62 @@ export async function readProxyBody(body, budget, { abort } = {}) {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-export async function proxyPeer(id, req, relativePath, query) {
+// Chat responses are NDJSON and can take many minutes before the model emits
+// its answer. Buffering that body means the caller sees no headers and no
+// keepalive bytes, so Bun and Node fetch abort at their 300s default while
+// the model is still generating. Forward each chunk as it arrives. The idle
+// and deadline budgets are the same ones readProxyBody uses.
+export async function streamProxyBody(body, budget, out, { abort } = {}) {
+  const iterator = body[Symbol.asyncIterator]();
+  const hardAt = Date.now() + (budget.mode === 'idle' ? budget.deadlineMs : budget.ms);
+  let idleAt = Date.now() + (budget.mode === 'idle' ? budget.idleMs : budget.ms);
+  let total = 0;
+  let pending = iterator.next();
+  try {
+    while (true) {
+      const now = Date.now();
+      if (now >= hardAt) {
+        pending.catch(() => {});
+        abort?.();
+        throw Object.assign(new Error('Mesh proxy deadline exceeded'), { code: 'deadline' });
+      }
+      if (budget.mode === 'idle' && now >= idleAt) {
+        pending.catch(() => {});
+        abort?.();
+        throw Object.assign(new Error('Mesh proxy idle timeout: no bytes for 60s'), { code: 'idle' });
+      }
+      const wait = Math.max(1, Math.min(idleAt, hardAt) - now);
+      let timer;
+      const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve({ timeout: true }), wait); });
+      const result = await Promise.race([pending.then((v) => ({ v })), timeout]);
+      clearTimeout(timer);
+      if (result.timeout) continue;
+      pending = null;
+      if (result.v.done) break;
+      const value = result.v.value;
+      if (value && value.byteLength) {
+        total += value.byteLength;
+        if (total > 8 * 1024 * 1024) {
+          abort?.();
+          throw Object.assign(new Error('Peer response too large'), { code: 'too-large' });
+        }
+        out.write(Buffer.from(value));
+        if (budget.mode === 'idle') idleAt = Date.now() + budget.idleMs;
+      }
+      pending = iterator.next();
+    }
+  } catch (e) {
+    if (pending) pending.catch(() => {});
+    abort?.();
+    throw e;
+  }
+}
+
+function chatProxyPath(relativePath) {
+  return /^\/(?:api\/)?chat$/.test(relativePath);
+}
+
+export async function proxyPeer(id, req, relativePath, query, out) {
   const rel = relativePath.startsWith('/') ? relativePath : `/${relativePath}`;
   if ((!proxied.test(rel) && !proxiedBare.test(rel)) || rel.includes('..') || rel.includes('%')) bad('This route is not available through mesh proxy', 403);
   relativePath = rel;
@@ -240,6 +295,28 @@ export async function proxyPeer(id, req, relativePath, query) {
       body, signal: ctrl.signal, redirect: 'error',
     });
     clearTimeout(headerTimer);
+    if (chatProxyPath(relativePath) && out && response.body) {
+      const ctype = response.headers.get('content-type') || 'application/x-ndjson; charset=utf-8';
+      out.writeHead(response.status, {
+        'Content-Type': ctype,
+        'Cache-Control': 'no-store',
+        'X-Accel-Buffering': 'no',
+      });
+      const stopUpstream = () => ctrl.abort();
+      req.on('close', stopUpstream);
+      try {
+        await streamProxyBody(response.body, budget, out, { abort: stopUpstream });
+        if (!out.writableEnded) out.end();
+      } catch (e) {
+        try {
+          if (!out.writableEnded) {
+            out.write(`${JSON.stringify({ t: 'error', message: `Mesh proxy failed: ${e.message}` })}\n`);
+            out.end();
+          }
+        } catch { /* the caller already hung up */ }
+      }
+      return { streamed: true, status: response.status };
+    }
     const result = response.body
       ? await readProxyBody(response.body, budget, { abort: () => ctrl.abort() })
       : '';

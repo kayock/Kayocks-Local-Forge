@@ -70,7 +70,12 @@ export async function routeControl(req, res, url, p) {
     if (method === 'DELETE') { respond(res, mesh.removePeer(dec(m[1]))); return true; }
   }
   if ((m = match(p, /^\/api\/mesh\/([^/]+)\/(proxy|p)(\/.*)$/))) {
-    const r = await mesh.proxyPeer(dec(m[1]), req, m[3], url.search || '');
+    const rel = m[3].startsWith('/') ? m[3] : `/${m[3]}`;
+    if (/^\/(?:api\/)?chat$/.test(rel)) {
+      await mesh.proxyPeer(dec(m[1]), req, rel, url.search || '', res);
+      return true;
+    }
+    const r = await mesh.proxyPeer(dec(m[1]), req, rel, url.search || '');
     res.writeHead(r.status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
     res.end(r.body); return true;
   }
