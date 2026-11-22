@@ -166,9 +166,11 @@ if (fs.existsSync(stateFile)) {
 // ---- 5. native PTY backend --------------------------------------------
 const caps = await req(BASE, 'GET', '/api/pty/capabilities', undefined, token);
 ok('/api/pty/capabilities reachable', caps.status === 200, JSON.stringify(caps.json || {}));
-ok('native PTY backend reported (node-pty)', caps.json?.available === true && String(caps.json?.backend || '').startsWith('node-pty'),
+const realPtyBackend = caps.json?.available === true &&
+  (caps.json?.backend === 'bun-conpty' || String(caps.json?.backend || '').startsWith('node-pty'));
+ok('real native PTY backend reported (Bun ConPTY or node-pty)', realPtyBackend,
   `caps = ${JSON.stringify(caps.json)} — NDJSON fallback is NOT the installed product's terminal`);
-if (!(caps.json?.available && String(caps.json.backend).startsWith('node-pty'))) {
+if (!realPtyBackend) {
   try { child.kill(); } catch {}
   process.exit(1);
 }

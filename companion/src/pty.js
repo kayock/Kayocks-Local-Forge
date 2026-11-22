@@ -19,6 +19,7 @@
 //  - lifecycle: hard cap on live sessions (LRU-evict oldest idle), full
 //    process-tree kill on stop/exit, everything reaped on shutdown.
 import path from 'node:path';
+import { createBunPtyBackend, isStandaloneWindowsBunPty } from './bun-pty.js';
 import { config, findWorkspace } from './config.js';
 import { log } from './config.js';
 
@@ -34,6 +35,15 @@ import { log } from './config.js';
 let pty = null;
 let ptyLoadError = null;
 let ptyBackend = 'node-pty';
+// Bun's compiled Windows executable has its own real ConPTY implementation.
+// The compiled virtual module tree cannot reliably resolve node-pty's lazy
+// relative .node requires, even when the native sidecar exists on disk.
+// Prefer Bun's own PTY ONLY in a Windows standalone executable; preserve the
+// established node-pty and NDJSON paths for Node.js and other platforms.
+if (isStandaloneWindowsBunPty()) {
+  pty = createBunPtyBackend();
+  ptyBackend = 'bun-conpty';
+} else {
 try {
   pty = (await import('node-pty')).default ?? (await import('node-pty'));
 } catch (e) {
@@ -67,6 +77,7 @@ try {
       ptyLoadError = `sidecar ${dir}: ${String(e2?.message || e2).slice(0, 120)}`;
     }
   }
+}
 }
 
 const SCROLLBACK_BYTES = 256 * 1024;
