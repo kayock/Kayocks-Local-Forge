@@ -95,7 +95,7 @@ Section /o "Desktop shortcut" SEC_DESK
                  "" "$INSTDIR\LocalForgeCompanion"
 SectionEnd
 
-Section "Start with Windows (run companion at login)" SEC_AUTORUN
+Section /o "Start with Windows (run companion at login)" SEC_AUTORUN
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "LocalForgeCompanionTray" \
                  '"$INSTDIR\LocalForgeTray.exe" /minimize'
 SectionEnd

@@ -12,11 +12,26 @@ cd "$(dirname "$0")/../.."   # project root
 OUT=download/windows
 PUB=public/downloads
 VER=$(node -e "console.log(require('./companion/package.json').version)")
-ZIG=${ZIG:-/tmp/zig/zig}
-MAKENSIS=${MAKENSIS:-/tmp/dl-nsis/root/usr/bin/makensis}
-export NSISDIR=${NSISDIR:-/tmp/dl-nsis/root/usr/share/nsis}
+# Use tools supplied on PATH in CI; retain the original local-build paths
+# as fallbacks for developers who built the toolchain manually.
+ZIG=${ZIG:-$(command -v zig || echo /tmp/zig/zig)}
+MAKENSIS=${MAKENSIS:-$(command -v makensis || echo /tmp/dl-nsis/root/usr/bin/makensis)}
+if [[ -z "${NSISDIR:-}" ]]; then
+  if [[ -d /usr/share/nsis ]]; then
+    export NSISDIR=/usr/share/nsis
+  else
+    export NSISDIR=/tmp/dl-nsis/root/usr/share/nsis
+  fi
+fi
+for command_path in "$ZIG" "$MAKENSIS"; do
+  if [[ ! -x "$command_path" ]]; then
+    echo "Missing build tool: $command_path (install Zig and NSIS or set ZIG/MAKENSIS)" >&2
+    exit 1
+  fi
+done
+command -v bun >/dev/null || { echo "Missing Bun compiler" >&2; exit 1; }
 
-mkdir -p "$OUT" "$PUB"
+mkdir -p "$OUT/LocalForgeCompanion" "$PUB"
 
 echo "== 1/3 companion.exe (bun --compile, windows-x64) =="
 bun build installer/windows/entry-companion.ts \

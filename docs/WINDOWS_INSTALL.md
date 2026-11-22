@@ -103,3 +103,18 @@ Rebuild the installer on any Linux machine:
 see `installer/windows/build-windows.sh`). Source:
 `installer/windows/` (`tray_main.c`, `installer.nsi`, `entry-companion.ts`).
 The npm route remains available: `npm install -g @localforge/companion`.
+
+## Phase 2 source-build verification (Companion v0.4.5)
+
+GitHub Actions now performs an additional **production Next.js build**, then
+cross-compiles an unsigned Windows Companion installer and attempts a silent
+install/`--help` startup smoke test on a Windows runner. The build is uploaded
+as a short-lived **test candidate artifact**, not automatically deployed or
+published as a stable release. Actual Windows desktop/tray behavior, existing
+installation upgrades, LAN discovery, GPU inference, signing and SmartScreen
+remain unverified until tested on real hardware.
+
+The installer opt-in *Start with Windows* section is now unselected by default.
+The `npm run build:windows` script points to the actual build script at
+`installer/windows/build-windows.sh`. The build script now accepts Zig and NSIS
+from `PATH` in addition to its earlier manually installed toolchain paths.

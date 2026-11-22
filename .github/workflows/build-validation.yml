@@ -1,0 +1,91 @@
+name: LocalForge production-build checks
+on:
+  push:
+    paths:
+      - 'src/**'
+      - 'companion/**'
+      - 'prisma/**'
+      - 'installer/**'
+      - 'scripts/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'next.config.ts'
+      - '.github/workflows/build-validation.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'companion/**'
+      - 'prisma/**'
+      - 'installer/**'
+      - 'scripts/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'next.config.ts'
+      - '.github/workflows/build-validation.yml'
+  workflow_dispatch:
+
+jobs:
+  ide-production-build:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: file:../db/localforge-ci.db
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npm run build
+
+  windows-installer-candidate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: oven-sh/setup-bun@v2
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: '0.14.1'
+      - name: Install NSIS
+        run: sudo apt-get update && sudo apt-get install -y nsis
+      - name: Install Companion dependencies
+        run: npm ci
+        working-directory: companion
+      - name: Cross-build Windows Companion and installer
+        run: bash installer/windows/build-windows.sh
+      - name: Check artifact integrity
+        run: |
+          test -s "download/windows/LocalForge-Companion-Setup-$(node -p "require('./companion/package.json').version").exe"
+          sha256sum download/windows/LocalForge-Companion-Setup-*.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LocalForge-Windows-Companion-unsigned-candidate
+          path: download/windows/LocalForge-Companion-Setup-*.exe
+          if-no-files-found: error
+          retention-days: 14
+
+  windows-installer-smoke:
+    needs: windows-installer-candidate
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: LocalForge-Windows-Companion-unsigned-candidate
+          path: candidate
+      - name: Test silent installation and bundled Companion startup
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = (Get-ChildItem -Path candidate -Filter 'LocalForge-Companion-Setup-*.exe' | Select-Object -First 1).FullName
+          if (-not $installer) { throw 'Windows installer missing' }
+          $result = Start-Process -FilePath $installer -ArgumentList '/S' -Wait -PassThru
+          if ($result.ExitCode -ne 0) { throw "Silent installer exit code $($result.ExitCode)" }
+          $bin = Join-Path $env:LOCALAPPDATA 'Programs\LocalForge Companion\LocalForgeCompanion\localforge-companion.exe'
+          if (-not (Test-Path $bin)) { throw "Bundled companion not installed: $bin" }
+          $output = (& $bin --help 2>&1 | Out-String)
+          if ($LASTEXITCODE -ne 0 -or $output -notmatch 'Usage: localforge-companion') { throw "Bundled companion startup failed: $output" }
+          Write-Host 'Windows installer candidate and companion --help smoke test passed.'
