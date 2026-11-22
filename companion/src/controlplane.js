@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 // Companion control-plane HTTP contract consumed by src/lib/mesh/client.ts.
 import { sendJson, readBody } from './http-utils.js';
 import { findWorkspace } from './config.js';
@@ -83,6 +85,32 @@ export async function routeControl(req, res, url, p) {
   if ((m = match(p, /^\/api\/ws\/([^/]+)\/revision$/)) && method === 'GET') {
     const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
     respond(res, await memory.workspaceRevision(ws)); return true;
+  }
+
+  // ---- RC3: project rules & skills (.localforge/ in the workspace) ----
+  if ((m = match(p, /^\/api\/ws\/([^/]+)\/project-guidance$/))) {
+    const ws = findWorkspace(dec(m[1])); if (!ws) unknownWs(m[1]);
+    const readLocal = (rel, cap) => {
+      try {
+        const full = path.join(ws.path, rel);
+        if (!fs.existsSync(full) || !fs.statSync(full).isFile()) return null;
+        const content = fs.readFileSync(full, 'utf8');
+        return content.length > cap ? content.slice(0, cap) + `…[truncated at ${cap} chars]` : content;
+      } catch { return null; }
+    };
+    const rules = readLocal('.localforge/rules.md', 12 * 1024);
+    const skills = [];
+    const skillsDir = path.join(ws.path, '.localforge', 'skills');
+    try {
+      if (fs.existsSync(skillsDir)) {
+        for (const f of fs.readdirSync(skillsDir).filter((f) => f.endsWith('.md')).slice(0, 24)) {
+          const content = readLocal(path.join('.localforge', 'skills', f), 8 * 1024);
+          if (content) skills.push({ name: f.replace(/\.md$/, ''), content });
+        }
+      }
+    } catch { /* unreadable skills dir */ }
+    respond(res, { rules, skills });
+    return true;
   }
 
   // ---- RC3: task checkpoints (shadow git) ----

@@ -45,7 +45,7 @@ import { useAuth } from '@/lib/store/auth';
 import { useMesh } from '@/lib/store/mesh';
 import { AgentRunner } from '@/lib/agent/runner';
 import { PipelineRunner } from '@/lib/agent/orchestrator';
-import { agentSystemPrompt, type WorkspaceContext } from '@/lib/agent/prompts';
+import { agentSystemPrompt, projectGuidanceBlock, type WorkspaceContext } from '@/lib/agent/prompts';
 import { CORE_TOOLS } from '@/lib/agent/tools';
 import { createContract, contractPromptBlock, buildHandoffPacket, markSteeringApplied, recordProgress, setStatus as setContractStatus, waiveRequirement } from '@/lib/agent/task-contract';
 import type { AgentEvent, AgentMessage, ToolProtocolMode, CompletionResult } from '@/lib/agent/types';
@@ -523,7 +523,13 @@ export function IdeView() {
       // Problem C: the contract block leads every non-chat system prompt —
       // requirements survive compaction because the block is re-sent each run.
       const basePrompt = agentSystemPrompt(wsCtx, agentMode === 'chat' ? 'chat' : 'task', settings.agentDevMode);
-      const systemPrompt = contract ? `${contractPromptBlock(contract, { role: agentMode === 'pipeline' ? 'pipeline stage' : 'task agent' })}\n\n=== RUNTIME ===\n${basePrompt}` : basePrompt;
+      // Project rules & skills (RC3): loaded from .localforge/ on the workspace host
+      let guidanceBlock = '';
+      try {
+        const g = await client.getProjectGuidance(ws.workspaceId);
+        guidanceBlock = projectGuidanceBlock(g.rules, g.skills ?? [], task);
+      } catch { /* older companion / no guidance — fine */ }
+      const systemPrompt = [contract ? contractPromptBlock(contract, { role: agentMode === 'pipeline' ? 'pipeline stage' : 'task agent' }) : '', guidanceBlock, basePrompt].filter(Boolean).join('\n\n');
       if (contract) persistContract(contract);
 
       // Durable task session (RC3): every run is recorded and resumable.

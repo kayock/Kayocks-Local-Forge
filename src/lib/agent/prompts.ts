@@ -77,6 +77,26 @@ export function agentSystemPrompt(ctx: WorkspaceContext, mode: 'chat' | 'task', 
   ].filter(Boolean).join('\n\n');
 }
 
+// Project rules & skills (Cline Rules/Skills equivalent): rules are always
+// in effect; only skills whose NAME or heading matches task keywords are
+// injected — relevant guidance without bloating every prompt.
+export function projectGuidanceBlock(rules: string | null, skills: { name: string; content: string }[], task: string): string {
+  const parts: string[] = [];
+  if (rules?.trim()) parts.push(['=== PROJECT RULES (from .localforge/rules.md — ALWAYS in effect) ===', rules.trim()].join('\n'));
+  const t = task.toLowerCase();
+  const relevant = (skills ?? []).filter((s) => {
+    const name = s.name.toLowerCase();
+    if (t.includes(name) || name.split(/[-_\s]+/).some((w) => w.length > 3 && t.includes(w))) return true;
+    const heading = s.content.split('\n').find((l) => l.startsWith('# '))?.toLowerCase() ?? '';
+    return heading.split(/[\s-]+/).some((w) => w.length > 4 && t.includes(w));
+  }).slice(0, 3);
+  for (const s of relevant) parts.push(['=== PROJECT SKILL: ' + s.name + ' ===', s.content.trim()].join('\n'));
+  if ((skills ?? []).length > relevant.length) {
+    parts.push(`Available project skills (load with the project-guidance panel when needed): ${(skills ?? []).map((s) => s.name).join(', ')}`);
+  }
+  return parts.length ? parts.join('\n\n') : '';
+}
+
 export function fallbackSystemAddon(): string {
   return FALLBACK_ADDON;
 }

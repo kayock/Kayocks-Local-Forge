@@ -475,6 +475,57 @@ export const CORE_TOOLS: ToolDef[] = [
     },
   },
   {
+    name: 'workspace_map',
+    description: 'Get a compact map of the project: top-level structure, per-directory file counts, and the package manifest (name/scripts/dependency counts). Use FIRST when orienting in an unfamiliar repo instead of listing everything.',
+    danger: 'safe',
+    params: [
+      { name: 'path', type: 'string', description: 'Subdirectory to map (default: workspace root)', required: false },
+    ],
+    async run(args, ctx) {
+      const base = canonRelPath(args.path || '.');
+      const listed = await ctx.fs.listDir(base);
+      const entries = (listed ?? []) as { path: string; type: string; size?: number }[];
+      const dirs = new Map<string, number>();
+      const topFiles: string[] = [];
+      let total = 0;
+      for (const e of entries) {
+        total++;
+        const rel = String(e.path);
+        const slash = rel.indexOf('/');
+        if (slash === -1) {
+          if (e.type === 'dir') dirs.set(rel, dirs.get(rel) ?? 0);
+          else topFiles.push(rel);
+        } else {
+          const d = rel.slice(0, slash);
+          dirs.set(d, (dirs.get(d) ?? 0) + 1);
+        }
+      }
+      const lines = [
+        `Workspace map (${base}) — ${total} entries, ${dirs.size} top-level dirs, ${topFiles.length} root files.`,
+        dirs.size ? `Dirs: ${[...dirs.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15).map(([d, n]) => `${d}/ (${n})`).join(', ')}` : '',
+        topFiles.length ? `Root files: ${topFiles.slice(0, 15).join(', ')}` : '',
+      ].filter(Boolean);
+      // manifest awareness (best-effort)
+      for (const mf of ['package.json', 'Cargo.toml', 'go.mod', 'pyproject.toml', 'requirements.txt']) {
+        try {
+          const f = await ctx.fs.readFile(mf);
+          if (mf === 'package.json') {
+            try {
+              const j = JSON.parse(f.content);
+              lines.push(`package.json: name=${j.name ?? '?'} scripts=[${Object.keys(j.scripts ?? {}).slice(0, 8).join(', ')}] deps=${Object.keys(j.dependencies ?? {}).length} devDeps=${Object.keys(j.devDependencies ?? {}).length}`);
+            } catch { lines.push(`package.json present (unparseable preview: ${f.content.slice(0, 80)})`); }
+          } else {
+            lines.push(`${mf} present (${f.content.split('\n').length} lines)`);
+          }
+          break;
+        } catch { /* manifest not present */ }
+      }
+      lines.push('Use list_dir/read_file/search_project for the specific areas you change next.');
+      return { output: lines.join('\n') };
+    },
+  },
+
+  {
     name: 'create_dir',
     description: 'Create a directory (and parents) in the workspace.',
     danger: 'safe',

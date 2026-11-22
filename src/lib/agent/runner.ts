@@ -140,7 +140,7 @@ const STALL_STOP_AFTER_NO_PROGRESS = 4;
 // used to distinguish pointless repetition from legitimate re-runs).
 const FS_WRITERS = new Set(['write_file', 'edit_file', 'create_dir', 'delete_path', 'extract_archive']);
 const FS_MAYBE_WRITERS = new Set(['run_command', 'launch_app', 'stop_process', 'install_dependencies', 'run_tests', 'run_build']);
-const READ_TOOLS = new Set(['read_file', 'list_dir', 'search_project', 'process_status', 'workspace_info']);
+const READ_TOOLS = new Set(['read_file', 'list_dir', 'search_project', 'process_status', 'workspace_info', 'workspace_map']);
 
 export interface RunResult {
   content: string;

@@ -120,6 +120,11 @@ export class CompanionClient {
     return json as T;
   }
 
+  // ---- RC3: project rules & skills (.localforge/ in the workspace) ----
+  async getProjectGuidance(workspaceId: string): Promise<{ rules: string | null; skills: { name: string; content: string }[] }> {
+    return this.req('GET', `/api/ws/${workspaceId}/project-guidance`);
+  }
+
   // ---- RC3: task checkpoints (shadow git on this companion's workspace) ----
   async createCheckpoint(workspaceId: string, label: string): Promise<{ available: boolean; checkpoint?: { id: string; hash: string; label: string; at: number }; error?: string }> {
     return this.req('POST', `/api/ws/${workspaceId}/checkpoints`, { label });
