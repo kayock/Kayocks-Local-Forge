@@ -14,9 +14,9 @@ import { useWorkspace } from '@/lib/store/workspace';
 import { useRouter } from '@/lib/store/router';
 import { ArrowRight, Cable, CheckCircle2, Download, FolderOpen, Loader2, RefreshCw, Terminal, XCircle } from 'lucide-react';
 
-// Windows installer served from this site (public/downloads). Keep the
-// filename in sync with installer/windows/build-windows.sh + public/downloads.
-const WINDOWS_INSTALLER_URL = '/downloads/LocalForge-Companion-Setup-0.4.4.exe';
+// This same-origin endpoint selects the newest published GitHub Windows installer
+// and falls back to the verified v0.5.0 RC4 asset if GitHub's API is unavailable.
+const WINDOWS_INSTALLER_URL = '/api/downloads/windows-companion';
 
 export interface GateProps {
   client: CompanionClient;
@@ -70,14 +70,13 @@ export function PairingGate({ client, onPaired }: Omit<GateProps, 'onWorkspaceRe
                 </p>
                 <a
                   href={WINDOWS_INSTALLER_URL}
-                  download
                   className="mt-2 inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
                 >
                   <Download className="w-4 h-4" />
                   Download LocalForge Companion for Windows
                 </a>
                 <p className="text-xs text-muted-foreground mt-1.5">
-                  x64 installer · ~25 MB · no admin rights needed · your pairing code, workspaces and settings survive upgrades.
+                  Windows 10/11 x64 · current GitHub release · no admin rights needed · your pairing code, workspaces and settings survive upgrades.
                   Not digitally signed — Windows SmartScreen may ask for confirmation (choose “More info” → “Run anyway”).
                 </p>
                 <details className="mt-2 text-xs text-muted-foreground">
