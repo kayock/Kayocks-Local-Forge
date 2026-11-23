@@ -15,7 +15,10 @@
     "test:protocol": "bun test tests/protocol.test.ts",
     "test:companion": "cd companion && npm test",
     "test": "bun test tests/protocol.test.ts && cd companion && npm test",
-    "build:windows": "bash installer/windows/build-windows.sh"
+    "build:windows": "bash installer/windows/build-windows.sh",
+    "setup": "node scripts/setup-localforge.mjs",
+    "companion:start": "node companion/src/server.js",
+    "test:setup": "node --test tests/setup-localforge.test.mjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
