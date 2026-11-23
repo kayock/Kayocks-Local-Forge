@@ -46,6 +46,35 @@ See [Phase 2 implementation and limits](docs/CONTROL_PLANE_PHASE2_2026-11-21.md)
 this code. Physical fleet tests, Next.js build verification, native discovery
 and automated agent scheduling remain separate work.
 
+## One-command self-hosted setup (Windows / Linux / macOS)
+
+Clone this repository, install Node.js 20+ and npm, then run:
+
+```bash
+npm run setup
+```
+
+The setup command installs missing IDE dependencies and prepares the local Companion.
+On Windows x64 it offers to download the current GitHub Releases installer,
+**verifies SHA-256 before running the installer**, and leaves Windows installer
+confirmation to the user. On Linux/macOS it installs the Companion dependencies
+from this checkout; no global package or background service is added. Existing
+Companion installations are left alone unless explicitly upgraded with
+`npm run setup -- --upgrade`. Use `npm run setup -- --yes` for a confirmed,
+unattended Windows installer invocation (the OS may still display its installer
+UI). To prepare only the Companion, use `npm run setup -- --companion-only`.
+
+Start the Linux/macOS Companion with `npm run companion:start`, or launch the
+Windows Companion from the Start Menu. For a brand-new self-hosted IDE database,
+review the database settings before running `npx prisma db push`, then start
+the IDE with `npm run dev` and pair in the browser. Setup never overwrites
+`.env`, resets the database, changes existing pairing/workspaces, or creates
+an automatic-start service. **A Git checkout and a hosted/browser IDE do not
+silently install software on the viewer's computer.**
+
+The verified Windows installer is also available directly from
+[GitHub Releases](https://github.com/kayock/Kayocks-Local-Forge/releases).
+
 ## Quick start (5 minutes)
 
 ### 1. Run the IDE
