@@ -89,7 +89,11 @@ async function resolveWindowsInstaller() {
 }
 
 function run(command, args, cwd = ROOT) {
-  const result = spawnSync(command, args, { cwd, stdio: 'inherit', shell: false });
+  // Windows npm is a .cmd wrapper and cannot be spawned directly without cmd.exe.
+  const isWindowsNpm = process.platform === 'win32' && (command === 'npm' || command === 'npm.cmd');
+  const executable = isWindowsNpm ? (process.env.ComSpec || 'cmd.exe') : command;
+  const invocation = isWindowsNpm ? ['/d', '/s', '/c', 'npm', ...args] : args;
+  const result = spawnSync(executable, invocation, { cwd, stdio: 'inherit', shell: false });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(command + ' exited with status ' + result.status);
 }
