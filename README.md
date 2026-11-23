@@ -11,7 +11,7 @@ A self-hostable AI coding IDE with real project files, terminals, local-model co
 **[Get started](#quick-start) · [Windows Companion](https://github.com/kayock/Kayocks-Local-Forge/releases/tag/v0.5.0-rc4) · [Features](#what-you-can-do) · [Screenshots](#screenshots) · [Documentation](#documentation)**
 
 [![Release: v0.5.0 RC4](https://img.shields.io/badge/release-v0.5.0%20RC4-7c3aed)](https://github.com/kayock/Kayocks-Local-Forge/releases/tag/v0.5.0-rc4)
-[![License: MIT](https://img.shields.io/badge/license-MIT-555)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-555)](installer/windows/LICENSE.txt)
 [![Build checks](https://github.com/kayock/Kayocks-Local-Forge/actions/workflows/build-validation.yml/badge.svg)](https://github.com/kayock/Kayocks-Local-Forge/actions/workflows/build-validation.yml)
 
 </div>
@@ -193,4 +193,4 @@ Bug reports, test results, and pull requests are welcome through [GitHub Issues]
 
 ## License
 
-LocalForge is distributed under the **MIT License**. See [third-party licenses](docs/LICENSES.md) for bundled dependencies.
+LocalForge is distributed under the **MIT License**; see the [license text](installer/windows/LICENSE.txt) and [third-party licenses](docs/LICENSES.md) for bundled dependencies.
