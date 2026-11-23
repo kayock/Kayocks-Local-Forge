@@ -1,189 +1,196 @@
 <div align="center">
 
+<img src="public/logo.svg" width="84" alt="LocalForge logo" />
+
 # LocalForge IDE
 
-> **v0.5.0 release candidate** (`v0.5-dev`) — Cline-class autonomous coding on a private multi-agent mesh:
-> • Real PTY terminals (node-pty; packaged sidecar for the compiled Windows binary; NDJSON fallback preserved)
-> • Plan/Act working modes with an observe→reason→act→verify discipline and evidence-gated completion
-> • Durable, searchable, resumable task sessions + shadow-git checkpoints with safe rollback
-> • Repository awareness (workspace map) and project rules/skills (`.localforge/`)
-> • mDNS LAN discovery, cross-machine parallel fan-out with dependency-aware task graphs, durable SQLite project memory
-> • Live Runs / Fleet Map / Memory / Diagnostics surfaces, transparent approvals, user steering
->
-> Build: `npm install && npm run build && npm start` · Tests: `bun test tests/` + `cd companion && npm test` · Windows installer CI: `.github/workflows/windows-installer.yml`
+**Your models. Your machines. Your workspace.**
 
-**Your models. Your machine. Your IDE.**
+A self-hostable AI coding IDE with real project files, terminals, local-model connections, coding agents, and a multi-machine control center.
 
-A browser-based AI coding environment that connects to language models already
-running on your own computer. Real files, real terminals, real builds — with
-every tool call visible.
+**[Get started](#quick-start) · [Windows Companion](https://github.com/kayock/Kayocks-Local-Forge/releases/tag/v0.5.0-rc4) · [Features](#what-you-can-do) · [Screenshots](#screenshots) · [Documentation](#documentation)**
+
+[![Release: v0.5.0 RC4](https://img.shields.io/badge/release-v0.5.0%20RC4-7c3aed)](https://github.com/kayock/Kayocks-Local-Forge/releases/tag/v0.5.0-rc4)
+[![License: MIT](https://img.shields.io/badge/license-MIT-555)](LICENSE)
+[![Build checks](https://github.com/kayock/Kayocks-Local-Forge/actions/workflows/build-validation.yml/badge.svg)](https://github.com/kayock/Kayocks-Local-Forge/actions/workflows/build-validation.yml)
 
 </div>
 
-LocalForge is a working software system, not a mockup. It has three parts:
+> **Current release: v0.5.0 RC4 (prerelease, November 2026).** This is an actively developed prototype, **not a stable general-availability release**. The packaged Windows Companion passed automated GitHub-hosted Windows installation, pairing, and real terminal tests. Physical desktop acceptance testing and full multi-machine, real-model validation are still in progress. See the [release notes](docs/releases/v0.5.0-rc4.md) and [verification details](docs/VERIFICATION.md).
 
-| Part | What it is | Where it runs |
-| --- | --- | --- |
-| **Web IDE** (`/`) | Next.js app: Monaco editor, file explorer, agent chat, terminal, preview, dashboards | Hosted (or self-hosted) |
-| **Companion** (`companion/`) | Small Node.js service: file tools, shell execution, model-server proxy, preview server, pairing | The customer's machine (Windows/Linux; macOS compatible) |
-| **Hosted backend** (`src/app/api/`) | Accounts, sessions, project metadata, billing scaffolding, usage analytics | Hosted server (never sees code or prompts) |
+![LocalForge IDE screenshot](docs/evidence/screenshots/02-ide.png)
 
-The browser talks **directly** to the companion for everything local. The hosted
-backend only manages accounts and metadata — source code and model prompts never
-leave the customer's machine unless the user explicitly enables a transfer
-feature (none is enabled in this build).
+## Quick start
 
+You can self-host the IDE and Companion from this repository, or use a deployed browser IDE with a separately installed Companion. **Opening the website does not install software on your computer.**
 
-## Companion control plane (v0.4.5 source candidate)
+### Option A — Install the IDE and prepare your Companion from source
 
-The `companion/` source now implements the Phase 2 hardware, Model Manager,
-explicitly paired LAN mesh peers, agent scratchpad/notebook/assignments and
-workspace-revision routes used by `MeshClient`. Nothing loads a model during
-inventory. Existing provider/chat and pairing contracts remain supported.
-See [Phase 2 implementation and limits](docs/CONTROL_PLANE_PHASE2_2026-11-21.md).
+**Requirements:** Git, Node.js 20 or newer, npm, and a computer running Windows 10/11 x64, Linux, or macOS. The Windows installer is available for x64; Linux/macOS use the Companion source path. macOS has not completed hardware acceptance testing.
 
-**Source-only:** the supplied Windows/Linux installers were not rebuilt from
-this code. Physical fleet tests, Next.js build verification, native discovery
-and automated agent scheduling remain separate work.
-
-## One-command self-hosted setup (Windows / Linux / macOS)
-
-Clone this repository, install Node.js 20+ and npm, then run:
-
-```bash
+~~~bash
+git clone https://github.com/kayock/Kayocks-Local-Forge.git
+cd Kayocks-Local-Forge
 npm run setup
-```
+~~~
 
-The setup command installs missing IDE dependencies and prepares the local Companion.
-On Windows x64 it offers to download the current GitHub Releases installer,
-**verifies SHA-256 before running the installer**, and leaves Windows installer
-confirmation to the user. On Linux/macOS it installs the Companion dependencies
-from this checkout; no global package or background service is added. Existing
-Companion installations are left alone unless explicitly upgraded with
-`npm run setup -- --upgrade`. Use `npm run setup -- --yes` for a confirmed,
-unattended Windows installer invocation (the OS may still display its installer
-UI). To prepare only the Companion, use `npm run setup -- --companion-only`.
+The setup command prepares the IDE dependencies and Companion:
 
-Start the Linux/macOS Companion with `npm run companion:start`, or launch the
-Windows Companion from the Start Menu. For a brand-new self-hosted IDE database,
-review the database settings before running `npx prisma db push`, then start
-the IDE with `npm run dev` and pair in the browser. Setup never overwrites
-`.env`, resets the database, changes existing pairing/workspaces, or creates
-an automatic-start service. **A Git checkout and a hosted/browser IDE do not
-silently install software on the viewer's computer.**
+| Platform | What setup does |
+| --- | --- |
+| **Windows 10/11 x64** | Offers the published GitHub Releases Companion installer, downloads it, checks its SHA-256 digest, and launches the standard Windows installer after confirmation. |
+| **Linux** | Installs the Companion's dependencies from this checkout. No system-wide package or background service is created. |
+| **macOS** | Uses the same source-based Companion path; desktop compatibility is not yet fully verified. |
 
-The verified Windows installer is also available directly from
-[GitHub Releases](https://github.com/kayock/Kayocks-Local-Forge/releases).
+The setup script **does not silently install an application**, overwrite an existing `.env`, reset your database, replace an existing Windows Companion without `--upgrade`, change your pairing/workspaces, or enable an automatic-start service. An existing source Companion dependency installation is left in place by default.
 
-## Quick start (5 minutes)
+**Start the Companion.** On Windows, open **LocalForge Companion** from the Start Menu and find its pairing code in the tray app. On Linux or macOS, run in a separate terminal:
 
-### 1. Run the IDE
+~~~bash
+npm run companion:start
+~~~
 
-```bash
-# hosted instance (the preview you were given), or self-host:
-npm install
-cp .env.example .env   # Windows: copy .env.example .env
-mkdir -p db            # Windows: mkdir db
+**Start the IDE.** For a *new* self-hosted installation, review `.env` (created by setup only if absent), then initialize the new database:
+
+~~~bash
 npx prisma db push
-npm run dev          # http://localhost:3000
-```
+~~~
 
-### 2. Install the companion on your computer
+Start the development IDE:
 
-```bash
-npm install -g @localforge/companion   # or: cd companion && npm link
-localforge-companion
-```
+| Linux / macOS | Windows |
+| --- | --- |
+| `npm run dev` | `npx next dev -p 3000` |
 
-It prints a **pairing code**, e.g. `PAIRING CODE: AB23CD45`.
+> Windows uses `npx next dev -p 3000` here because the current `npm run dev` script uses Unix shell features. This does not affect the Windows Companion installer.
 
-### 3. Pair the browser
+Visit **http://localhost:3000/#/ide**, enter the eight-character Companion pairing code, authorize a project folder, then select an already-running model server in Settings.
 
-Open the IDE → **Launch IDE** → paste the pairing code.
+**Already installed?** Run `npm run setup` again to preserve working installations. Use `npm run setup -- --upgrade` only when you intentionally want the setup script to update the Companion. `npm run setup -- --companion-only` skips IDE dependency preparation.
 
-### 4. Pick your model
+### Option B — Use the browser IDE with the Windows Companion
 
-Settings → **Discover** finds Ollama (`:11434`), LM Studio (`:1234`),
-llama.cpp `llama-server` (`:8080`), Lemonade (`:8000`) and any
-OpenAI-compatible endpoint automatically. Choose a model.
+If you already have access to a deployed LocalForge IDE, you **do not need to clone this repository** just to use its browser interface. Install and start the Windows Companion on the machine whose files and models you want to use, then pair it from **Launch IDE**.
 
-### 5. Authorize a workspace and run the agent
+**[Download LocalForge Companion v0.5.0 RC4 for Windows](https://github.com/kayock/Kayocks-Local-Forge/releases/download/v0.5.0-rc4/LocalForge-Companion-Setup-0.5.0.exe)** · [SHA-256 checksums](https://github.com/kayock/Kayocks-Local-Forge/releases/download/v0.5.0-rc4/SHA256SUMS.txt) · [Windows installation guide](docs/WINDOWS_INSTALL.md)
 
-Open a folder, switch the agent panel to **Agent** mode, describe a task:
+This is an **unsigned** installer. Windows may show an unknown-publisher SmartScreen warning. Verify the published checksum before running the file; do not disable antivirus protections. The installer is for the **Companion**, not a bundled Windows desktop IDE. No model weights or inference servers are included.
 
-> Build a todo app with add, complete and delete; write a test and make it pass.
+### From pairing to your first task
 
-Watch it read files, write code, run `npm test`, read failures, fix code, and
-finish — with every tool call in the **Tool log** panel.
+1. Start a Companion and copy its pairing code (from the Windows tray or Linux/macOS terminal).
+2. Open **Launch IDE** and pair the browser with that Companion.
+3. Open or create a project and authorize its workspace folder.
+4. Start your own Ollama, LM Studio, llama.cpp, Lemonade, or OpenAI-compatible server; in **Settings → Discover**, select the endpoint and model.
+5. Give the agent a coding task. Review its file operations, commands, test results, and completion evidence in the IDE.
 
-## Verify it end-to-end
+## What you can do
 
-```bash
-# full proof-of-function test against a real local model (see docs/VERIFICATION.md):
-llama-server -m <model.gguf> -c 8192 --port 8080 &
-bun run test:e2e -- --endpoint http://127.0.0.1:8080
-```
+| Area | Capability |
+| --- | --- |
+| **Real coding workspace** | Monaco editor, file explorer, multi-tab editing, terminal, preview, project templates, Git operations, and tool history. |
+| **Coding agents** | Plan/Act workflows; file reads/writes, searches, shell tools, builds, tests, checkpoints, review and rework. Models vary in their ability to use tools reliably. |
+| **Bring your own models** | Connect to locally running Ollama, LM Studio, llama.cpp, Lemonade, and compatible endpoints; choose models and settings without bundling model weights. |
+| **Multi-agent collaboration** | Planner, coder, tester, and reviewer handoffs, with model and workspace choices controlled by the user. |
+| **Fleet control** | Discover and connect Companions, view machines, select workers, and inspect Live Runs and coordination state. Cross-machine execution is still undergoing physical-fleet validation. |
+| **Persistent project context** | Workspace indexing, task sessions, recovery checkpoints, and project memory are included in the current development code. |
+| **Visible execution** | Tools and commands are displayed with results; authorization and execution policy stay under user control. |
 
-The E2E script drives the same agent runtime the browser uses, checks all ten
-proof points, and writes `e2e-report.json`. It **fails honestly** if no real
-model endpoint is available.
+LocalForge is designed around **explicit participation**: connecting a machine does not by itself authorize it to run a task. A controller coordinates; workers participate according to user settings. It does **not** need to load or download a model just to inventory available endpoints.
 
-## Source audit and patched builds (November 2026)
+## Screenshots
 
-This source contains the verified workspace/preview and release-packaging repairs
-documented in [the audit report](docs/REPAIR_AUDIT_2026-11-21.md). Run the
-Companion regression suite with `cd companion && npm test` (28 passing tests).
-Build clean source archives with `bash scripts/build-source-zip.sh`.
+These screenshots come from the repository's existing validation evidence. Some screens may differ in the current release candidate.
 
-**Important:** Companion 0.4.4's packaged backend does not yet implement the
-IDE's full mesh/model-manager/agent-memory API contract. These features are not
-yet independently verified end to end. The original prebuilt Windows installers
-are **not** rebuilt by changing source; rebuild them before treating the
-filesystem fixes as installed.
+| Editor and project | Model configuration |
+| --- | --- |
+| ![LocalForge editor](docs/evidence/screenshots/04-editor.png) | ![LocalForge model settings](docs/evidence/screenshots/07-model.png) |
+
+| Agent execution | Tool activity |
+| --- | --- |
+| ![LocalForge agent execution](docs/evidence/screenshots/08-agent-run.png) | ![LocalForge tool log](docs/evidence/screenshots/11-toollog-fixed.png) |
+
+The Fleet Map, Control Center, and Live Runs screens are part of the current development interface; an updated screenshot set for those newer views has not yet been published in this repository.
+
+## How it works
+
+~~~text
+Browser IDE (Next.js)
+       |
+       | direct / explicitly configured Companion connection
+       v
+LocalForge Companion on your computer
+       |-- authorized workspace files and Git
+       |-- terminal, commands, builds and tests
+       |-- local model endpoints and streaming
+       |
+       +-- optional explicitly connected LAN Companions
+               |-- their own files, terminals and model endpoints
+
+Optional hosted services: account/project metadata (not your source files).
+~~~
+
+The **IDE** is the web interface. The **Companion** is the process that can access a machine's authorized folders, terminal and model servers. They are separate because a browser alone cannot safely perform local filesystem and shell work.
+
+By default, local file access and model requests are handled through the Companion. A hosted account backend stores metadata, not repository contents or prompts. If you deliberately configure an **external inference provider**, requests sent to that provider are subject to its own handling and privacy policies. See [architecture](docs/ARCHITECTURE.md), [API contracts](docs/API_CONTRACTS.md), and [deployment](docs/DEPLOYMENT.md).
+
+## Release and verification status
+
+**Latest published Windows package:** [v0.5.0 RC4](https://github.com/kayock/Kayocks-Local-Forge/releases/tag/v0.5.0-rc4) — a **prerelease**, not a stable v0.5.0 launch.
+
+| Area | Evidence / current limit |
+| --- | --- |
+| Core editor, project tooling, browser agent flow | Implemented and covered by documented build, browser, protocol, and integration checks. |
+| Windows Companion installer and terminal | Automated Windows-runner installation, pairing, genuine ConPTY commands, interrupt recovery, and uninstall passed for the RC4 artifact. |
+| Local models and agent workflows | Protocol and targeted live-model tests exist; behavior varies by model, and an end-to-end run with your own server is recommended. |
+| Multi-machine discovery and coordinated runs | Implemented in development; realistic LAN fleets, host permissions, and cross-machine task flows still need independent hardware acceptance. |
+| Linux and macOS | Linux source Companion supported; no Linux desktop installer ships in RC4. macOS source compatibility is not equivalent to tested, signed native packaging. |
+| Hosted billing and teams | Prototype scaffolding only; live payments are disabled. |
+
+Some older feature-matrix pages describe earlier milestones. For **RC4-specific packaging and test claims**, use the [release notes](docs/releases/v0.5.0-rc4.md) and [Windows guide](docs/WINDOWS_INSTALL.md). Do not assume a new source commit updates an installer that users have already downloaded.
+
+## Developers and testers
+
+From a checked-out repository with dependencies installed:
+
+~~~bash
+npm run test:setup        # setup/release-selection tests
+npm run test:companion    # Companion integration suite
+npm run test:protocol     # IDE protocol checks (requires Bun)
+npm run build             # production IDE build
+~~~
+
+The full local-model E2E test requires a **running, reachable model server**. See [verification instructions](docs/VERIFICATION.md) for the exact procedure and the limits of automated results. The Windows installer is built and exercised by [Windows installer CI](https://github.com/kayock/Kayocks-Local-Forge/actions/workflows/windows-installer.yml); it is not regenerated merely by editing the source.
+
+**Development branch:** [`v0.5-dev`](https://github.com/kayock/Kayocks-Local-Forge/tree/v0.5-dev) · **Default branch:** [`main`](https://github.com/kayock/Kayocks-Local-Forge)
 
 ## Documentation
 
-| Doc | Contents |
+| Guide | Purpose |
 | --- | --- |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design + architecture diagram |
-| [docs/API_CONTRACTS.md](docs/API_CONTRACTS.md) | Browser ↔ companion ↔ backend API contracts |
-| [docs/DATABASE_SCHEMA.md](docs/DATABASE_SCHEMA.md) | Hosted backend data model |
-| [docs/FEATURE_MATRIX.md](docs/FEATURE_MATRIX.md) | Working / partial / simulated / untested / unimplemented — honest status |
-| [docs/VERIFICATION.md](docs/VERIFICATION.md) | Automated + manual verification procedures and results |
-| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Self-hosting, production deployment, companion packaging |
-| [docs/WINDOWS_INSTALL.md](docs/WINDOWS_INSTALL.md) | Windows companion installer: install, tray app, troubleshooting, SmartScreen, verification status |
-| [docs/LIMITATIONS_AND_NEXT_STEPS.md](docs/LIMITATIONS_AND_NEXT_STEPS.md) | Known limits and the roadmap |
-| [docs/LICENSES.md](docs/LICENSES.md) | Third-party licenses (commercial compatibility) |
+| [Windows installation](docs/WINDOWS_INSTALL.md) | Companion download, tray, pairing and troubleshooting |
+| [Deployment and operations](docs/DEPLOYMENT.md) | Self-hosting, hosting architecture, configuration |
+| [Architecture](docs/ARCHITECTURE.md) | Main components, agent and Companion design |
+| [API contracts](docs/API_CONTRACTS.md) | IDE ↔ Companion interfaces |
+| [Feature matrix](docs/FEATURE_MATRIX.md) | Detailed feature coverage, including prior milestone statuses |
+| [Verification](docs/VERIFICATION.md) | Automated/manual test procedures and evidence |
+| [Limitations and next steps](docs/LIMITATIONS_AND_NEXT_STEPS.md) | Known gaps and roadmap, including earlier milestone notes |
+| [RC4 release notes](docs/releases/v0.5.0-rc4.md) | Verified installer, provenance, and outstanding acceptance tests |
+| [Database schema](docs/DATABASE_SCHEMA.md) | Hosted metadata model |
+| [Third-party licenses](docs/LICENSES.md) | Dependency/license information |
 
-## Repository layout
+## Troubleshooting and feedback
 
-```
-├── src/                     # Next.js 16 IDE (App Router, TypeScript)
-│   ├── app/                 # single route + REST API routes (auth/projects/billing/usage)
-│   ├── components/ide/      # IDE panels (explorer, editor, agent, terminal, preview…)
-│   ├── components/views/    # landing / auth / dashboard / settings
-│   └── lib/
-│       ├── agent/           # ★ agent runtime (pure TS, shared by browser + E2E)
-│       ├── companion/       # ★ browser-side companion client
-│       ├── store/           # zustand state
-│       └── hosted/          # hosted-backend client
-├── companion/               # ★ Node.js companion (deps: ws only)
-│   ├── src/                 # server, fs tools, exec, providers, preview
-│   └── test/                # black-box integration tests (node:test)
-├── e2e/live-e2e.ts          # ★ live end-to-end verification script
-├── prisma/                  # hosted backend schema (SQLite; Postgres-ready)
-└── docs/                    # documentation suite
-```
+**Download link fails?** Use the [GitHub release assets](https://github.com/kayock/Kayocks-Local-Forge/releases/tag/v0.5.0-rc4) directly. The current pairing screen uses a same-origin download endpoint that selects published Windows installers.
 
-## Status
+**Companion not reachable?** Confirm the Companion is running; its default address is `http://127.0.0.1:7337` for local pairing. Check [Windows troubleshooting](docs/WINDOWS_INSTALL.md) for browser permission and tray details.
 
-This is a **prototype build**: the IDE, companion, agent runtime, and billing
-scaffolding are implemented and tested; live payments are deliberately
-inert (`SUBSCRIPTIONS_ENABLED=false`). See
-[docs/FEATURE_MATRIX.md](docs/FEATURE_MATRIX.md) for the exact status of every
-feature, including what is verified, what is protocol-tested only, and what is
-not yet built.
+**No models found?** Start your inference server first, verify its endpoint is reachable from the Companion machine, then run **Discover**. LocalForge does not install or launch your models automatically.
+
+**Working from multiple computers?** Install a Companion on each machine you intend to expose for local file/terminal access, pair it, and explicitly configure its participation. Connecting alone is not permission to dispatch work.
+
+Bug reports, test results, and pull requests are welcome through [GitHub Issues](https://github.com/kayock/Kayocks-Local-Forge/issues). Include OS, Companion version, exact steps and expected/actual results; **remove passwords, tokens and private project data** from logs.
 
 ## License
 
-MIT (this repository). Third-party licenses: see docs/LICENSES.md.
+LocalForge is distributed under the **MIT License**. See [third-party licenses](docs/LICENSES.md) for bundled dependencies.
