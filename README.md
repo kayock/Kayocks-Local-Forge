@@ -16,7 +16,7 @@ A self-hostable AI coding IDE with real project files, terminals, local-model co
 
 </div>
 
-> **Current release: v0.5.0 RC4 (prerelease, November 2026).** This is an actively developed prototype, **not a stable general-availability release**. The packaged Windows Companion passed automated GitHub-hosted Windows installation, pairing, and real terminal tests. Physical desktop acceptance testing and full multi-machine, real-model validation are still in progress. See the [release notes](docs/releases/v0.5.0-rc4.md) and [verification details](docs/VERIFICATION.md).
+> **Current release: v0.5.0 RC4 (prerelease, November 2026).** This is an actively developed prototype, **not a stable general-availability release**. The packaged Windows Companion passed automated GitHub-hosted Windows installation, pairing, and real terminal tests. Physical desktop installer acceptance and complete multi-machine end-to-end reliability testing are still in progress. In a real Station/Windows/Portable QR-code project run, LocalForge successfully connected models across machines, handed off agent work, and created files, although the test stage failed and the generated application displayed a blank page. See the [release notes](docs/releases/v0.5.0-rc4.md) and [verification details](docs/VERIFICATION.md).
 
 ![LocalForge IDE screenshot](docs/evidence/screenshots/02-ide.png)
 
@@ -92,7 +92,7 @@ This is an **unsigned** installer. Windows may show an unknown-publisher SmartSc
 | **Coding agents** | Plan/Act workflows; file reads/writes, searches, shell tools, builds, tests, checkpoints, review and rework. Models vary in their ability to use tools reliably. |
 | **Bring your own models** | Connect to locally running Ollama, LM Studio, llama.cpp, Lemonade, and compatible endpoints; choose models and settings without bundling model weights. |
 | **Multi-agent collaboration** | Planner, coder, tester, and reviewer handoffs, with model and workspace choices controlled by the user. |
-| **Fleet control** | Discover and connect Companions, view machines, select workers, and inspect Live Runs and coordination state. Cross-machine execution is still undergoing physical-fleet validation. |
+| **Fleet control** | Discover and connect Companions, view machines, select workers, and inspect Live Runs and coordination state. A real Station/Windows/Portable collaboration demonstrated orchestration, model connections, agent handoffs and file creation; broader production reliability remains unverified. |
 | **Persistent project context** | Workspace indexing, task sessions, recovery checkpoints, and project memory are included in the current development code. |
 | **Visible execution** | Tools and commands are displayed with results; authorization and execution policy stay under user control. |
 
@@ -143,7 +143,7 @@ By default, local file access and model requests are handled through the Compani
 | Core editor, project tooling, browser agent flow | Implemented and covered by documented build, browser, protocol, and integration checks. |
 | Windows Companion installer and terminal | Automated Windows-runner installation, pairing, genuine ConPTY commands, interrupt recovery, and uninstall passed for the RC4 artifact. |
 | Local models and agent workflows | Protocol and targeted live-model tests exist; behavior varies by model, and an end-to-end run with your own server is recommended. |
-| Multi-machine discovery and coordinated runs | Implemented in development; realistic LAN fleets, host permissions, and cross-machine task flows still need independent hardware acceptance. |
+| Multi-machine discovery and coordinated runs | **Demonstrated on a real three-machine LAN run:** Station orchestration, Windows and Portable model connectivity, agent handoff, and file creation worked. The QR-code application itself failed testing and displayed a blank page; comprehensive, repeatable end-to-end validation remains outstanding. |
 | Linux and macOS | Linux source Companion supported; no Linux desktop installer ships in RC4. macOS source compatibility is not equivalent to tested, signed native packaging. |
 | Hosted billing and teams | Prototype scaffolding only; live payments are disabled. |
 
