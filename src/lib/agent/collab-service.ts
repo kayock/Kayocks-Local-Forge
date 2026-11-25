@@ -320,13 +320,16 @@ export async function startCollabRun(
       done: done.then((r: FanoutReport) => {
         const verdict = r.failed === 0 && r.completed > 0 ? 'APPROVE' : r.completed > 0 ? 'REQUEST_CHANGES' : 'UNKNOWN';
         return {
-        // normalized into the coordinator report shape the UI already renders
+        // Fan-out does not run the sequential reviewer-evidence gate, so its
+        // completion stays incomplete rather than claiming ACCEPTED.
         verdict,
         results: [],
         totalTurns: r.totalTurns,
         reworkPassesUsed: 0,
         conflicts: r.conflicts,
         plan: '',
+        planning: 'MISSING',
+        completion: 'INCOMPLETE',
         objectiveAcceptance: evaluateObjectiveAcceptance({
           applicable: collaborationRequiresExecution(cfg.stages),
           reviewerVerdict: verdict,
