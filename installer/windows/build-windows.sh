@@ -19,6 +19,10 @@ cd "$(dirname "$0")/../.."   # project root
 OUT=download/windows
 PUB=public/downloads
 VER=$(node -e "console.log(require('./companion/package.json').version)")
+# The installer filename stays the numeric semver. The executable must report
+# the same release string a source checkout reports, or a Windows companion
+# stays on 0.5.0 while Station and Portable report the release candidate.
+REL=$(node -e "const p=require('./companion/package.json'); console.log(String(p.localforgeRelease || p.version || '').trim())")
 # Use tools supplied on PATH in CI; retain the original local-build paths
 # as fallbacks for developers who built the toolchain manually.
 ZIG=${ZIG:-$(command -v zig || echo /tmp/zig/zig)}
@@ -61,7 +65,7 @@ bun build installer/windows/entry-companion.ts \
   --compile --target=bun-windows-x64 \
   --outfile "$OUT/LocalForgeCompanion/localforge-companion.exe" \
   --define 'process.env.NODE_ENV:"production"' \
-  --define "process.env.LOCALFORGE_COMPANION_VERSION:\"${VER}\""
+  --define "process.env.LOCALFORGE_COMPANION_VERSION:\"${REL}\""
 
 echo "== 2/4 tray GUI (zig cc, windows-x64) =="
 "$ZIG" cc -target x86_64-windows-gnu -O2 -Wno-unused-function \

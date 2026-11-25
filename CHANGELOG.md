@@ -8,6 +8,8 @@ A planner reply without a `PLAN:` section is a missing deliverable, not a comple
 
 The text tool helper, context compaction, and backend thinking controls are unchanged.
 
+The Windows companion compile embeds `localforgeRelease` in the executable. Embedding the numeric package version made a Windows build report `0.5.0` while a source checkout reported the release candidate.
+
 ## v0.5.0 RC5 — collaboration reliability (v0.5-dev, 2026-11-24)
 
 Context compaction now uses the smaller of an explicit participant limit and the context the running server actually allocated. A model's training context is ignored. When neither a live measurement nor an explicit limit is known, compaction does not assume 8192. Tool definitions and reserved output tokens are included in the budget. A lower `num_ctx` is not sent to a running llama.cpp server, and Ollama is not asked to shrink a context that is already loaded.

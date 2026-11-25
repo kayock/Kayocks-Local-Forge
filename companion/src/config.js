@@ -6,11 +6,12 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 
 // One product identity: companion/package.json. `version` is the numeric
-// semver installers and the Windows executable report. `localforgeRelease`
-// is what a source checkout reports (for example a release candidate).
-// The Windows compile passes LOCALFORGE_COMPANION_VERSION so the bundled
-// executable does not depend on a package.json that bun does not ship
-// beside the binary — that missing file is why older builds stayed on 0.4.5.
+// semver the installer filename uses. `localforgeRelease` is the string a
+// source checkout reports (for example a release candidate). The Windows
+// compile embeds that release as LOCALFORGE_COMPANION_VERSION so the bundled
+// executable matches Station and Portable even though bun does not ship
+// package.json beside the binary. Embedding the numeric version instead is
+// why a Windows build would stay on 0.5.0.
 import pkg from '../package.json' with { type: 'json' };
 
 function productVersion() {
