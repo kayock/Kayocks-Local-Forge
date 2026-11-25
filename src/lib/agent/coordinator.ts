@@ -624,7 +624,7 @@ export class Coordinator {
         return reviewerRun;
       };
       const reviewPaths = requiredReviewPaths({ changedFiles: coderFiles, task: this.cfg.task, plan });
-      const reviewerMessages: { role?: string; content?: string; name?: string; toolCalls?: { name?: string; args?: Record<string, unknown> }[] }[] = [];
+      const reviewerMessages: AgentMessage[] = [];
       const firstReview = await runReviewer(this.stageTask('reviewer', plan, { coder: coderSummary, test: testReport, reviewFiles: reviewPaths }));
       reviewerMessages.push(...(firstReview.r.messages || []));
       if (firstReview.r.paused) return this.report(results, 'UNKNOWN', reworkUsed, totalTurns, conflicts, 'paused');

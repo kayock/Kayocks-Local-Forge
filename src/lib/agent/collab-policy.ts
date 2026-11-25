@@ -187,13 +187,14 @@ export interface TranscriptMessage {
   role?: string;
   content?: string;
   name?: string;
-  toolCalls?: { name?: string; args?: Record<string, unknown> }[];
+  toolCalls?: { name?: string; args?: Record<string, unknown> | string | null }[];
 }
 
 const READ_ALIASES = new Set(['read_file', 'cat', 'open_file', 'view_file', 'view']);
 
-function argPath(args: Record<string, unknown> | undefined): string {
-  const value = args?.path ?? args?.file ?? args?.filepath ?? args?.file_path;
+function argPath(args: Record<string, unknown> | string | null | undefined): string {
+  if (!args || typeof args !== 'object') return '';
+  const value = args.path ?? args.file ?? args.filepath ?? args.file_path;
   return typeof value === 'string' ? value.trim() : '';
 }
 
