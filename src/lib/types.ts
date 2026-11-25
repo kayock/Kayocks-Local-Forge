@@ -34,6 +34,9 @@ export interface InferenceParams {
   // Per request, and only for a provider that understands it. 'auto' is not
   // sent: the companion omits the field. Undefined preserves older settings.
   think?: 'auto' | 'enabled' | 'disabled';
+  // Measured context of a loaded server. Informational for compaction and
+  // for refusing to shrink Ollama. It is not a request to change llama.cpp.
+  liveNumCtx?: number;
 }
 
 export const DEFAULT_INFERENCE: InferenceParams = {

@@ -37,7 +37,7 @@ import {
   browserClose, browserStatus, closeHeadlessSessions,
 } from './browser.js';
 import {
-  discoverProviders, listModels, proxyChat, loadModel, unloadModel,
+  discoverProviders, listModels, proxyChat, loadModel, unloadModel, readServerContext,
   probeToolSupport, testConnection, ChatProxyError, normalizeBaseUrl,
   probeEndpoint, resolveLemonadeCredentials,
 } from './providers.js';
@@ -529,6 +529,11 @@ async function routeApi(req, res, url, p) {
     const body = await readBody(req, 64 * 1024);
     const models = await listModels(body.provider);
     return sendJson(res, 200, { models });
+  }
+  if (p === '/api/providers/context' && method === 'POST') {
+    const body = await readBody(req, 64 * 1024);
+    const context = await readServerContext(body.provider, body.model);
+    return sendJson(res, 200, { context });
   }
   if (p === '/api/chat' && method === 'POST') {
     const body = await readBody(req, 8 * 1024 * 1024);

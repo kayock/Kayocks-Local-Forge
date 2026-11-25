@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.5.0 RC5 — collaboration reliability (v0.5-dev, 2026-11-24)
+
+Context compaction now uses the smaller of an explicit participant limit and the context the running server actually allocated. A model's training context is ignored. When neither a live measurement nor an explicit limit is known, compaction does not assume 8192. Tool definitions and reserved output tokens are included in the budget. A lower `num_ctx` is not sent to a running llama.cpp server, and Ollama is not asked to shrink a context that is already loaded.
+
+OpenAI-compatible thinking controls are backend-aware. Ollama still receives its `think` boolean. llama.cpp receives `chat_template_kwargs.enable_thinking` when `/props` or `owned_by: llamacpp` identifies the server, which was verified to turn Bryce reasoning on and off. `reasoning_effort` is sent only when that server advertises support. Auto still omits the field. An endpoint that does not advertise a supported control is left unchanged and the limitation is reported. Reasoning text is forwarded, not hidden.
+
+Planner, tester, and reviewer instructions now match the tools those roles can use. A missing reviewer verdict gets one retry and stays UNKNOWN; it does not start the debugger. The debugger runs for a real `REQUEST_CHANGES` verdict or a failed mandatory acceptance command, with the command and output included. Objective acceptance requires the exact acceptance command. A different passing command does not replace it. The coordinator report separates completion from the process returning.
+
+The text tool helper is unchanged: one JSON object, `{"tool","args"}`, per reply.
+
 ## v0.5.0 RC4 — critical integration & Windows installer hotfix (v0.5-dev, 2026-11-22)
 
 Four confirmed RC3 defects repaired (commits e258503, aed8467):

@@ -47,6 +47,7 @@ import { detectToolDialect, type ToolDialect } from './dialects';
 import { evaluateCompletion } from './completion';
 import { buildHandoffPacket, contractPromptBlock, bumpInPlace, type TaskContract } from './task-contract';
 import { RecoveryCoordinator, canonicalSignature, type StallClass } from './recovery';
+import { compactToBudget, compactionBudgetChars, resolveContextCapacity, type ResolvedContext } from './context-capacity';
 
 export interface RunnerConfig {
   companion: CompanionClient;
@@ -58,6 +59,9 @@ export interface RunnerConfig {
   provider: ProviderConfig;
   model: string;
   params?: Partial<InferenceParams>;
+  // Verified allocated context from the running server. Undefined means it
+  // was not probed. A number is a live measurement, not the training context.
+  liveContextTokens?: number | null;
   systemPrompt: string;
   task: string;
   contextMessages?: AgentMessage[];
@@ -219,6 +223,7 @@ export class AgentRunner {
   private lastBoundaryHadManual = false;
   private boundariesSinceManual = 99;
   private sentEnvelopes = new Set<string>();
+  private reportedUnknownContext = false;
   // Milestone 1: cumulative token usage for the run (from usage events)
   private usageTotal: { promptTokens: number | null; completionTokens: number | null } = { promptTokens: null, completionTokens: null };
 
@@ -520,7 +525,8 @@ export class AgentRunner {
     if (!def) {
       entry.status = 'error';
       finishArgs();
-      entry.output = validateToolArgs(name, args) || `Unknown tool "${name}".`;
+      const available = this.toolsForRun().map((tool) => tool.name).join(', ');
+      entry.output = `Unknown tool "${name}" for this role. Available tools: ${available}. Do not call "${name}" again.`;
       return { entry, args, name };
     }
 
@@ -865,26 +871,25 @@ export class AgentRunner {
   // assistant prose when the conversation would overflow. Keeps system, the
   // original task, coordinator/steering/recovery messages and the most recent
   // messages intact (recovery envelopes are never trimmed away).
+  private contextState(): ResolvedContext {
+    const reserved = this.cfg.params?.maxTokensExplicit === true ? this.cfg.params.maxTokens : 1200;
+    return resolveContextCapacity({
+      explicitTokens: this.cfg.params?.numCtx,
+      explicit: this.cfg.params?.numCtxExplicit === true,
+      liveTokens: this.cfg.liveContextTokens,
+      reservedOutputTokens: reserved,
+    });
+  }
+
   private compact(wire: any[]): any[] {
-    const numCtx = this.cfg.params?.numCtx ?? 8192;
-    const budgetChars = Math.max(8000, (numCtx - 1200) * 4);
-    const size = (m: any) => (m.content?.length || 0) + (m.tool_calls ? JSON.stringify(m.tool_calls).length : 0);
-    let total = wire.reduce((a, m) => a + size(m), 0);
-    if (total <= budgetChars) return wire;
-    const cutoff = Math.max(1, wire.length - 8);
-    for (let i = 1; i < cutoff && total > budgetChars; i++) {
-      const m = wire[i];
-      const len = (m.content ?? '').length;
-      if (typeof m.content === 'string' && /\[COORDINATOR RECOVERY|\[USER STEERING|MODEL HANDOFF|TASK CONTRACT/.test(m.content)) continue; // never trimmed
-      if ((m.role === 'tool' || (m.role === 'user' && String(m.content ?? '').startsWith('[TOOL RESULT]'))) && len > 240) {
-        total -= len - 200;
-        m.content = String(m.content).slice(0, 200) + '…[earlier tool output trimmed]';
-      } else if (m.role === 'assistant' && len > 500) {
-        total -= len - 300;
-        m.content = String(m.content).slice(0, 300) + '…[trimmed]';
-      }
+    const resolved = this.contextState();
+    const toolOverhead = this.protocol === 'text' ? 0 : JSON.stringify(this.wireTools()).length;
+    const budgetChars = compactionBudgetChars(resolved, toolOverhead);
+    if (budgetChars == null && !this.reportedUnknownContext && wire.reduce((sum, message) => sum + String(message.content ?? '').length, 0) > 4000) {
+      this.reportedUnknownContext = true;
+      this.emit({ type: 'notice', message: resolved.note });
     }
-    return wire;
+    return compactToBudget(wire, budgetChars);
   }
 
   private wireTools() {
@@ -1101,6 +1106,8 @@ export class AgentRunner {
         streamedText = res!.text || streamedText;
       }
 
+      const thinkingControl = (endChunk as any)?.thinkingControl;
+      if (thinkingControl?.limitation) this.emit({ type: 'notice', message: String(thinkingControl.limitation) });
       this.emit({ type: 'text_final', v: streamedText });
       if (endChunk?.usage) this.emit({ type: 'usage', usage: endChunk.usage });
 

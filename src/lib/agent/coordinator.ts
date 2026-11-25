@@ -26,6 +26,14 @@ import { plannerPrompt, coderPrompt, testerPrompt, reviewerPrompt, debuggerPromp
 import { genAssignmentId } from '@/lib/store/mesh';
 import { collaborationRequiresExecution, evaluateObjectiveAcceptance, type ObjectiveAcceptance, type TestEvidence } from './acceptance';
 import { paramsWithThinking, type ThinkingMode } from './thinking';
+import {
+  checkAcceptanceCommands,
+  extractAcceptanceCommands,
+  parseReviewerVerdict,
+  reviewFollowup,
+  type CollaborationCompletion,
+  type ReviewerVerdict,
+} from './collab-policy';
 
 export type StageId = 'planner' | 'coder' | 'tester' | 'reviewer' | 'debugger';
 
@@ -56,6 +64,8 @@ export interface AgentTarget {
   // Omitted or 'auto' leaves the provider default. This does not change
   // another participant's setting.
   thinking?: ThinkingMode;
+  // Allocated context measured from the running server. This does not resize it.
+  liveContextTokens?: number | null;
 }
 
 export interface CoordinatorConfig {
@@ -78,6 +88,9 @@ export interface CoordinatorConfig {
   reassignOnEscalation?: boolean;
   toolProtocol?: ToolProtocolMode | 'auto-native' | 'force-text';
   autoSteering?: boolean;
+  // Exact commands that must pass from the workspace root. When omitted,
+  // commands named in the task as acceptance commands are used.
+  acceptanceCommands?: string[];
   onEvent: (e: AgentEvent & { stage?: string; agentId?: string; assignmentId?: string }) => void;
   approver?: Approver;
   allowedPatterns?: Set<string>;
@@ -92,7 +105,8 @@ export interface CoordinatorConfig {
 export interface CoordinatorReport {
   plan: string;
   results: { stage: StageId; assignmentId: string; agentId: string; machine: string; model: string; summary: string; turns: number; conflict?: string | null; escalated?: boolean; hitTurnLimit?: boolean }[];
-  verdict: 'APPROVE' | 'REQUEST_CHANGES' | 'UNKNOWN';
+  verdict: ReviewerVerdict;
+  completion: CollaborationCompletion;
   reworkPassesUsed: number;
   totalTurns: number;
   conflicts: string[];
@@ -215,14 +229,30 @@ export class Coordinator {
     try { await this.cfg.mesh.saveAssignment(this.cfg.workspaceId, a); } catch { /* host unreachable: keep in-memory */ }
   }
 
+  private acceptanceCommands(): string[] {
+    if (this.cfg.acceptanceCommands?.length) return this.cfg.acceptanceCommands;
+    return extractAcceptanceCommands(this.cfg.task);
+  }
+
+  private acceptanceBlock(): string {
+    const commands = this.acceptanceCommands();
+    if (!commands.length) return '';
+    return [
+      'MANDATORY ACCEPTANCE COMMANDS (run from the workspace root, exactly as written):',
+      ...commands.map((command) => `- ${command}`),
+      'A different command, including one that changes directory first, does not satisfy these commands.',
+    ].join('\n');
+  }
+
   private stageTask(stage: StageId, plan: string, prior: { coder?: string; test?: string; review?: string; issue?: string }): string {
     const task = this.cfg.task;
+    const acceptance = this.acceptanceBlock();
     switch (stage) {
-      case 'planner': return `Plan this task:\n\n${task}`;
-      case 'coder': return `Implement this plan in the shared workspace (your tools operate on the authoritative project — other agents may be editing other files; do not revert their work).\n\nTASK:\n${task}\n\nPLAN:\n${plan}`;
-      case 'tester': return `Verify the implementation of this task:\n${task}\n\nPlan that was implemented:\n${plan}\n\nCoder summary:\n${prior.coder ?? ''}`;
-      case 'reviewer': return `Review this implementation:\n\nTASK:\n${task}\n\nCoder summary:\n${prior.coder ?? ''}\n\nTester report:\n${prior.test ?? ''}`;
-      case 'debugger': return `The reviewer rejected the implementation. Diagnose and FIX these issues, then re-verify:\n\n${prior.issue}\n\nOriginal task:\n${task}`;
+      case 'planner': return [`Plan this task:\n\n${task}`, acceptance, 'Use only your planner tools. The workspace summary in your instructions is already available.'].filter(Boolean).join('\n\n');
+      case 'coder': return [`Implement this plan in the shared workspace (your tools operate on the authoritative project — other agents may be editing other files; do not revert their work).\n\nTASK:\n${task}\n\nPLAN:\n${plan}`, acceptance].filter(Boolean).join('\n\n');
+      case 'tester': return [`Verify the implementation of this task by executing the tests yourself. The coder summary is a claim, not evidence.\n${task}\n\nPlan that was implemented:\n${plan}\n\nCoder summary:\n${prior.coder ?? ''}`, acceptance].filter(Boolean).join('\n\n');
+      case 'reviewer': return `Review this implementation:\n\nTASK:\n${task}\n\nCoder summary:\n${prior.coder ?? ''}\n\nTester report:\n${prior.test ?? ''}\n\nYour finish summary must end with VERDICT: APPROVE, VERDICT: REQUEST_CHANGES, or VERDICT: BLOCKED.`;
+      case 'debugger': return [`Diagnose and FIX the reported failure, then re-run the same acceptance command:\n\n${prior.issue}\n\nOriginal task:\n${task}`, acceptance].filter(Boolean).join('\n\n');
     }
   }
 
@@ -271,7 +301,11 @@ export class Coordinator {
       workspaceId: this.cfg.workspaceId,
       provider,
       model,
-      params: paramsWithThinking(this.cfg.params, target.thinking),
+      params: {
+        ...paramsWithThinking(this.cfg.params, target.thinking),
+        ...(typeof target.liveContextTokens === 'number' ? { liveNumCtx: target.liveContextTokens } : {}),
+      },
+      liveContextTokens: target.liveContextTokens,
       systemPrompt: stagePrompt(stage, this.cfg.workspaceContext),
       workspaceMeta: {
         id: this.cfg.workspaceId,
@@ -535,34 +569,85 @@ export class Coordinator {
         // A run that names its stages does not invent tester work.
       } else {
       const testerAssign = await this.assignStage('tester', explicitTargets?.tester);
-      const testerRun = await this.runAgent('tester', testerAssign.target, this.stageTask('tester', plan, { coder: coderSummary }), []);
-      totalTurns += testerRun.r.turns;
-      testReport = testerRun.r.content || testerRun.r.note || '(no summary returned)';
-      results.push({ stage: 'tester', assignmentId: testerRun.assignment.id, agentId: testerRun.assignment.agentId, machine: testerAssign.target.machineName, model: testerAssign.target.model, summary: testReport, turns: testerRun.r.turns, conflict: testerRun.conflict, escalated: false, hitTurnLimit: testerRun.r.hitTurnLimit });
-      if (testerRun.conflict) conflicts.push(testerRun.conflict);
-      if (testerRun.r.paused && !testerRun.r.hitTurnLimit) return this.report(results, 'UNKNOWN', reworkUsed, totalTurns, conflicts, 'paused');
+      const runTester = async (extra: string) => {
+        const testerRun = await this.runAgent('tester', testerAssign.target, `${this.stageTask('tester', plan, { coder: coderSummary })}${extra}`, []);
+        totalTurns += testerRun.r.turns;
+        testReport = testerRun.r.content || testerRun.r.note || '(no summary returned)';
+        results.push({ stage: 'tester', assignmentId: testerRun.assignment.id, agentId: testerRun.assignment.agentId, machine: testerAssign.target.machineName, model: testerAssign.target.model, summary: testReport, turns: testerRun.r.turns, conflict: testerRun.conflict, escalated: false, hitTurnLimit: testerRun.r.hitTurnLimit });
+        if (testerRun.conflict) conflicts.push(testerRun.conflict);
+        return testerRun;
+      };
+      const firstTester = await runTester('');
+      if (firstTester.r.paused && !firstTester.r.hitTurnLimit) return this.report(results, 'UNKNOWN', reworkUsed, totalTurns, conflicts, 'paused');
+      const required = this.acceptanceCommands();
+      const evidenceNow = () => this.testEvidence.filter((item) => item.runId === this.runId);
+      let check = checkAcceptanceCommands(evidenceNow(), required);
+      if (check.missing.length > 0) {
+        this.cfg.onEvent({ type: 'notice', message: `Tester did not execute the required acceptance command (${check.missing.join('; ')}). Running the tester once more.` });
+        const testerRetry = await runTester('\n\nThe previous tester pass did not execute the mandatory command. Run that exact command now with run_command. Do not report PASS from the coder summary.');
+        if (testerRetry.r.paused && !testerRetry.r.hitTurnLimit) return this.report(results, 'UNKNOWN', reworkUsed, totalTurns, conflicts, 'paused');
+        check = checkAcceptanceCommands(evidenceNow(), required);
+      }
 
-      // 4. REVIEWER (+ escalation-aware rework)
+      // 4. REVIEWER. A missing verdict gets one formatting retry and is never
+      // treated as a request for changes.
       const reviewerAssign = await this.assignStage('reviewer', explicitTargets?.reviewer);
-      const reviewerRun = await this.runAgent('reviewer', reviewerAssign.target, this.stageTask('reviewer', plan, { coder: coderSummary, test: testReport }), []);
-      totalTurns += reviewerRun.r.turns;
-      review = reviewerRun.r.content || reviewerRun.r.note || '(no summary returned)';
-      results.push({ stage: 'reviewer', assignmentId: reviewerRun.assignment.id, agentId: reviewerRun.assignment.agentId, machine: reviewerAssign.target.machineName, model: reviewerAssign.target.model, summary: review, turns: reviewerRun.r.turns, conflict: reviewerRun.conflict, escalated: false, hitTurnLimit: reviewerRun.r.hitTurnLimit });
-      if (reviewerRun.conflict) conflicts.push(reviewerRun.conflict);
-      if (reviewerRun.r.paused) return this.report(results, 'UNKNOWN', reworkUsed, totalTurns, conflicts, 'paused');
+      const runReviewer = async (taskText: string) => {
+        const reviewerRun = await this.runAgent('reviewer', reviewerAssign.target, taskText, []);
+        totalTurns += reviewerRun.r.turns;
+        review = reviewerRun.r.content || reviewerRun.r.note || '(no summary returned)';
+        results.push({ stage: 'reviewer', assignmentId: reviewerRun.assignment.id, agentId: reviewerRun.assignment.agentId, machine: reviewerAssign.target.machineName, model: reviewerAssign.target.model, summary: review, turns: reviewerRun.r.turns, conflict: reviewerRun.conflict, escalated: false, hitTurnLimit: reviewerRun.r.hitTurnLimit });
+        if (reviewerRun.conflict) conflicts.push(reviewerRun.conflict);
+        return reviewerRun;
+      };
+      const firstReview = await runReviewer(this.stageTask('reviewer', plan, { coder: coderSummary, test: testReport }));
+      if (firstReview.r.paused) return this.report(results, 'UNKNOWN', reworkUsed, totalTurns, conflicts, 'paused');
+      verdict = parseReviewerVerdict(review);
+      const inspected = (messages: { name?: string }[] | undefined) =>
+        (messages || []).some((message) => message.name === 'read_file' || message.name === 'list_dir');
+      if (verdict === 'UNKNOWN') {
+        this.cfg.onEvent({ type: 'notice', message: 'Reviewer omitted the verdict line. Asking once for VERDICT: APPROVE, VERDICT: REQUEST_CHANGES, or VERDICT: BLOCKED. This is not a request for changes.' });
+        const reviewerRetry = await runReviewer(`Your previous review omitted the required verdict line. Do not turn that omission into a request for changes.\n\nPrevious review:\n${review}\n\nCall finish. End the summary with exactly one line: VERDICT: APPROVE, VERDICT: REQUEST_CHANGES, or VERDICT: BLOCKED.`);
+        if (reviewerRetry.r.paused) return this.report(results, verdict, reworkUsed, totalTurns, conflicts, 'paused');
+        verdict = parseReviewerVerdict(review);
+      } else if (required.length && !inspected(firstReview.r.messages)) {
+        this.cfg.onEvent({ type: 'notice', message: 'Reviewer returned a verdict without reading the implementation. Asking once for a file read. This is not a request for changes.' });
+        const reviewerRetry = await runReviewer('You have not read the implementation. Call list_dir or read_file on the files named in the task, then call finish. End with exactly one verdict line: VERDICT: APPROVE, VERDICT: REQUEST_CHANGES, or VERDICT: BLOCKED. Do not approve from another agent\'s summary alone.');
+        if (reviewerRetry.r.paused) return this.report(results, verdict, reworkUsed, totalTurns, conflicts, 'paused');
+        verdict = parseReviewerVerdict(review);
+      }
 
-      verdict = /VERDICT:\s*APPROVE/i.test(review) ? 'APPROVE' : /VERDICT:\s*REQUEST_CHANGES/i.test(review) ? 'REQUEST_CHANGES' : 'UNKNOWN';
-      if (verdict === 'APPROVE' || pass === reworkLimit) break;
+      const follow = reviewFollowup({
+        verdict,
+        verdictRetriesUsed: 1,
+        requiredMissing: check.missing.length > 0,
+        requiredFailed: check.failed.length > 0,
+        testerRetriesUsed: 1,
+        reworkUsed,
+        reworkLimit,
+        testerProducedEvidence: evidenceNow().length > 0,
+      });
+      if (follow.action === 'stop') break;
+      if (follow.action !== 'debugger') break;
 
       reworkUsed++;
-      this.cfg.onEvent({ type: 'notice', message: `Reviewer requested changes — rework pass ${reworkUsed} (debugger may run on a different machine).` });
+      const notice = follow.reason === 'request-changes'
+        ? `Reviewer requested changes — rework pass ${reworkUsed} (debugger may run on a different machine).`
+        : `Acceptance command failed — rework pass ${reworkUsed}. The missing or absent reviewer format is not the reason for this debugger pass.`;
+      this.cfg.onEvent({ type: 'notice', message: notice });
+      const issue = [
+        follow.reason === 'request-changes' ? review : '',
+        check.failed.map((item) => `FAILED ACCEPTANCE COMMAND: ${item.command}\nexit ${item.exitCode ?? 'unknown'}\n${item.output}`).join('\n\n'),
+        check.substitutes.length ? `These other commands passed and do not replace the mandatory command: ${check.substitutes.join('; ')}` : '',
+        verdict === 'UNKNOWN' ? 'The reviewer verdict was missing. That formatting gap is not the defect to fix.' : '',
+      ].filter(Boolean).join('\n\n');
       // escalation-aware: if the coder escalated, try a DIFFERENT machine for the debugger
       const escalated = this.escalations.some((e) => e.stage === 'coder');
       const debugTarget = escalated
         ? await this.alternativeMachine('debugger', coderAssign.target.machineId, explicitTargets?.debugger)
         : explicitTargets?.debugger;
       const dbgAssign = await this.assignStage('debugger', debugTarget ?? explicitTargets?.debugger);
-      const dbgRun = await this.runAgent('debugger', dbgAssign.target, this.stageTask('debugger', plan, { issue: review }), []);
+      const dbgRun = await this.runAgent('debugger', dbgAssign.target, this.stageTask('debugger', plan, { issue }), []);
       totalTurns += dbgRun.r.turns;
       coderSummary += `\n\n[Rework pass ${reworkUsed} — debugger on ${dbgAssign.target.machineName}] ${dbgRun.r.content}`;
       results.push({ stage: 'debugger', assignmentId: dbgRun.assignment.id, agentId: dbgRun.assignment.agentId, machine: dbgAssign.target.machineName, model: dbgAssign.target.model, summary: dbgRun.r.content || dbgRun.r.note || '(no summary returned)', turns: dbgRun.r.turns, conflict: dbgRun.conflict, escalated, hitTurnLimit: dbgRun.r.hitTurnLimit });
@@ -596,8 +681,24 @@ export class Coordinator {
       evidence: this.testEvidence,
       runId: this.runId,
       revision,
+      requiredCommands: this.acceptanceCommands(),
     });
-    const verdictNotice = `Reviewer verdict: ${verdict}. Objective acceptance: ${objectiveAcceptance.status}. ${objectiveAcceptance.reason}`;
+    const completion: CollaborationCompletion = state === 'paused'
+      ? 'PAUSED'
+      : objectiveAcceptance.status === 'FAIL'
+        ? 'TESTS_FAILED'
+        : objectiveAcceptance.status === 'NOT TESTED'
+          ? 'NOT_TESTED'
+          : verdict === 'UNKNOWN'
+            ? 'VERDICT_MISSING'
+            : verdict === 'REQUEST_CHANGES'
+              ? 'CHANGES_REQUESTED'
+              : verdict === 'BLOCKED'
+                ? 'BLOCKED'
+                : verdict === 'APPROVE' && objectiveAcceptance.status === 'PASS'
+                  ? 'ACCEPTED'
+                  : 'INCOMPLETE';
+    const verdictNotice = `Reviewer verdict: ${verdict}. Completion: ${completion}. Objective acceptance: ${objectiveAcceptance.status}. ${objectiveAcceptance.reason}`;
     if (state === 'paused') {
       this.cfg.onEvent({ type: 'paused', turn: turns, note: 'Coordinator paused — all agent assignments and scratchpads are persisted on the workspace host.' });
     } else {
@@ -613,6 +714,7 @@ export class Coordinator {
       plan: results.find((r) => r.stage === 'planner')?.summary ?? '',
       results,
       verdict,
+      completion,
       reworkPassesUsed: rework,
       totalTurns: turns,
       conflicts,

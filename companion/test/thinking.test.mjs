@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { applyOllamaThinking, proxyChat } from '../src/providers.js';
+import { applyOllamaThinking, applyOpenAiThinking, clearThinkingSupportCache, proxyChat, shouldForwardNumCtx } from '../src/providers.js';
 
 let upstream;
 let port;
@@ -9,6 +9,14 @@ let lastBody;
 
 before(async () => {
   upstream = http.createServer((req, res) => {
+    if (req.method === 'GET' && (req.url === '/props' || req.url === '/v1/props')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        chat_template_caps: { supports_tools: true, supports_reasoning_effort: false },
+        default_generation_settings: { n_ctx: 16384 },
+      }));
+      return;
+    }
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
     req.on('end', () => {
@@ -81,8 +89,118 @@ test('automatic Ollama requests omit think', async () => {
 });
 
 test('an OpenAI-compatible endpoint does not receive the Ollama think field', async () => {
+  clearThinkingSupportCache();
   const frames = await chat({ kind: 'openai', baseUrl: `http://127.0.0.1:${port}/v1` }, { think: 'disabled' });
   assert.equal('think' in lastBody, false);
+  assert.equal(lastBody.chat_template_kwargs.enable_thinking, false);
+  assert.equal('reasoning_effort' in lastBody, false);
   assert.equal(frames.some((f) => f.t === 'text' && f.v === 'visible'), true);
   assert.equal(frames.some((f) => f.t === 'thinking'), false);
+});
+
+test('llama.cpp enabled thinking requests enable_thinking and forwards reasoning_content', async () => {
+  clearThinkingSupportCache();
+  const frames = [];
+  const server = http.createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/props') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ chat_template_caps: { supports_reasoning_effort: false } }));
+      return;
+    }
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      lastBody = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: 'hidden-would-be-wrong' } }] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'answer' } }] })}\n\n`);
+      res.write('data: [DONE]\n\n');
+      res.end();
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const enabledPort = server.address().port;
+  try {
+    await proxyChat(
+      {
+        provider: { kind: 'openai', baseUrl: `http://127.0.0.1:${enabledPort}/v1` },
+        model: 'bryce',
+        messages: [{ role: 'user', content: 'ping' }],
+        params: { think: 'enabled' },
+      },
+      { write: (frame) => frames.push(frame), onClose: () => {} },
+    );
+  } finally {
+    server.close();
+  }
+  assert.equal('think' in lastBody, false);
+  assert.equal(lastBody.chat_template_kwargs.enable_thinking, true);
+  assert.deepEqual(frames.filter((frame) => frame.t === 'thinking').map((frame) => frame.v), ['hidden-would-be-wrong']);
+  assert.deepEqual(frames.filter((frame) => frame.t === 'text').map((frame) => frame.v), ['answer']);
+});
+
+test('an OpenAI endpoint without llama.cpp caps does not receive thinking extensions', async () => {
+  clearThinkingSupportCache();
+  const plain = http.createServer((req, res) => {
+    if (req.method === 'GET') {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end('{}');
+      return;
+    }
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      lastBody = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'visible' } }] })}\n\n`);
+      res.write('data: [DONE]\n\n');
+      res.end();
+    });
+  });
+  await new Promise((resolve) => plain.listen(0, '127.0.0.1', resolve));
+  const plainPort = plain.address().port;
+  const frames = [];
+  try {
+    await proxyChat(
+      {
+        provider: { kind: 'openai', baseUrl: `http://127.0.0.1:${plainPort}/v1` },
+        model: 'other',
+        messages: [{ role: 'user', content: 'ping' }],
+        params: { think: 'disabled' },
+      },
+      { write: (frame) => frames.push(frame), onClose: () => {} },
+    );
+  } finally {
+    plain.close();
+  }
+  assert.equal('think' in lastBody, false);
+  assert.equal('chat_template_kwargs' in lastBody, false);
+  const end = frames.find((frame) => frame.t === 'end');
+  assert.equal(end.thinkingControl.applied, 'unsupported');
+  assert.match(end.thinkingControl.limitation, /not advertise llama.cpp/);
+});
+
+test('automatic OpenAI requests omit thinking controls', async () => {
+  clearThinkingSupportCache();
+  await chat({ kind: 'openai', baseUrl: `http://127.0.0.1:${port}/v1` }, { temperature: 0.2 });
+  assert.equal('think' in lastBody, false);
+  assert.equal('chat_template_kwargs' in lastBody, false);
+});
+
+test('applyOpenAiThinking never copies the Ollama boolean', () => {
+  const disabled = {};
+  const result = applyOpenAiThinking(disabled, { think: 'disabled' }, { kind: 'llama-cpp', reasoningEffort: false });
+  assert.equal(result.applied, 'disabled');
+  assert.equal(disabled.chat_template_kwargs.enable_thinking, false);
+  assert.equal('think' in disabled, false);
+  const untouched = {};
+  applyOpenAiThinking(untouched, { think: 'auto' }, { kind: 'llama-cpp' });
+  assert.equal('chat_template_kwargs' in untouched, false);
+});
+
+test('num_ctx is not forwarded to llama.cpp or as a lower value to a loaded Ollama context', () => {
+  assert.equal(shouldForwardNumCtx({ numCtxExplicit: true, numCtx: 4096 }, { kind: 'openai', baseUrl: 'http://127.0.0.1:12450/v1' }), false);
+  assert.equal(shouldForwardNumCtx({ numCtxExplicit: true, numCtx: 4096, liveNumCtx: 16384 }, { kind: 'ollama', baseUrl: 'http://127.0.0.1:11434' }), false);
+  assert.equal(shouldForwardNumCtx({ numCtxExplicit: true, numCtx: 16384, liveNumCtx: 4096 }, { kind: 'ollama', baseUrl: 'http://127.0.0.1:11434' }), true);
+  assert.equal(shouldForwardNumCtx({ numCtx: 8192 }, { kind: 'ollama', baseUrl: 'http://127.0.0.1:11434' }), false);
 });

@@ -339,6 +339,102 @@ export function applyOllamaThinking(payload, params) {
   return payload;
 }
 
+const thinkingSupportCache = new Map();
+
+export function clearThinkingSupportCache() {
+  thinkingSupportCache.clear();
+}
+
+export function serverRoot(base) {
+  return normalizeBaseUrl(base).replace(/\/(?:api\/)?v\d+$/, '');
+}
+
+// llama.cpp advertises chat_template_caps on /props, or owned_by "llamacpp"
+// on /v1/models. Other OpenAI-compatible servers stay "unknown": auto keeps
+// their default, and enabled/disabled are reported as unsupported instead of
+// sending a flag that server may reject.
+export async function detectOpenAiThinkingSupport(base, headers = {}) {
+  const key = normalizeBaseUrl(base);
+  if (thinkingSupportCache.has(key)) return thinkingSupportCache.get(key);
+  let support = { kind: 'unknown', limitation: 'This OpenAI-compatible endpoint does not advertise llama.cpp reasoning controls. Thinking was left at the server default. Hiding reasoning text is not treated as disabled.' };
+  try {
+    const props = await fetchJson(`${serverRoot(key)}/props`, { timeoutMs: 2500, headers });
+    if (props.ok && props.json?.chat_template_caps) {
+      support = { kind: 'llama-cpp', reasoningEffort: props.json.chat_template_caps.supports_reasoning_effort === true, limitation: null };
+    } else {
+      const modelsUrl = /\/(?:api\/)?v\d+$/.test(key) ? `${key}/models` : `${key}/v1/models`;
+      const models = await fetchJson(modelsUrl, { timeoutMs: 2500, headers });
+      if (models.ok && Array.isArray(models.json?.data) && models.json.data.some((model) => model?.owned_by === 'llamacpp')) {
+        support = { kind: 'llama-cpp', reasoningEffort: false, limitation: null };
+      }
+    }
+  } catch {
+    // Probe failures leave the endpoint unknown. The chat request still proceeds.
+  }
+  thinkingSupportCache.set(key, support);
+  return support;
+}
+
+// Request-level llama.cpp control verified on Bryce: chat_template_kwargs
+// enable_thinking false returns content only, and true returns reasoning_content
+// even when the process was started with --reasoning off. reasoning_effort is
+// sent only when that server's caps say it supports the field.
+export function applyOpenAiThinking(payload, params, support) {
+  if (!payload || !params || params.think == null || params.think === 'auto') {
+    return { applied: 'omitted', limitation: null };
+  }
+  if (support?.kind !== 'llama-cpp') {
+    return { applied: 'unsupported', limitation: support?.limitation || 'Thinking could not be changed on this OpenAI-compatible endpoint.' };
+  }
+  const enable = params.think === 'enabled';
+  payload.chat_template_kwargs = { ...(payload.chat_template_kwargs || {}), enable_thinking: enable };
+  if (support.reasoningEffort === true) payload.reasoning_effort = enable ? 'high' : 'none';
+  return { applied: enable ? 'enabled' : 'disabled', limitation: null };
+}
+
+// num_ctx changes a running server's allocation. Never send it to llama.cpp.
+// On Ollama, do not send a value lower than the context already loaded.
+export function shouldForwardNumCtx(params, { kind, baseUrl } = {}) {
+  if (params?.numCtxExplicit !== true || params.numCtx == null) return false;
+  const ollama = kind === 'ollama' || /:11434(\/|$)/.test(baseUrl || '');
+  if (!ollama) return false;
+  const live = Number(params.liveNumCtx);
+  if (Number.isFinite(live) && live > 0 && Number(params.numCtx) < live) return false;
+  return true;
+}
+
+export function allocatedContextFromModelsPayload(payload, modelId) {
+  const rows = Array.isArray(payload?.data) ? payload.data : [];
+  const row = rows.find((item) => item?.id === modelId) || (rows.length === 1 ? rows[0] : null);
+  const tokens = Number(row?.meta?.n_ctx);
+  const train = Number(row?.meta?.n_ctx_train);
+  if (!Number.isFinite(tokens) || tokens <= 0) {
+    return { tokens: null, trainTokens: Number.isFinite(train) && train > 0 ? train : null, source: 'unknown', verified: false };
+  }
+  return {
+    tokens,
+    trainTokens: Number.isFinite(train) && train > 0 ? train : null,
+    source: 'live',
+    verified: true,
+  };
+}
+
+export async function readServerContext(provider, model) {
+  const base = normalizeBaseUrl(provider?.baseUrl || '');
+  const headers = authHeaders(credentialFor(provider));
+  if (provider?.kind === 'ollama') {
+    const ps = await fetchJson(`${base}/api/ps`, { timeoutMs: 2500, headers });
+    const loaded = (ps.json?.models || []).find((item) => item?.name === model || item?.model === model);
+    const live = Number(loaded?.context_length);
+    if (Number.isFinite(live) && live > 0) return { tokens: live, source: 'live', verified: true, trainTokens: null };
+    return { tokens: null, source: 'unknown', verified: false, trainTokens: null, note: 'Ollama has no loaded context for this model. The Modelfile context was not used as a live measurement.' };
+  }
+  const modelsUrl = /\/(?:api\/)?v\d+$/.test(base) ? `${base}/models` : `${base}/v1/models`;
+  const models = await fetchJson(modelsUrl, { timeoutMs: 2500, headers });
+  if (!models.ok) return { tokens: null, source: 'unknown', verified: false, trainTokens: null };
+  return allocatedContextFromModelsPayload(models.json, model);
+}
+
 export async function proxyChat(body, { write, onClose }) {
   const { provider, model, messages, tools, params = {} } = body;
   if (!provider?.baseUrl) throw new ChatProxyError('Missing provider.baseUrl');
@@ -362,6 +458,7 @@ export async function proxyChat(body, { write, onClose }) {
 
   let url, payload;
   let chatRouteCandidates;
+  let thinkingControl = { applied: 'omitted', limitation: null };
   if (kind === 'ollama') {
     url = `${base}/api/chat`;
     chatRouteCandidates = [url]; // Ollama has a single, stable chat route
@@ -377,7 +474,7 @@ export async function proxyChat(body, { write, onClose }) {
     // the user changed them; untouched defaults must NOT override the model
     // server's configured context or generation budget.
     if (params.maxTokensExplicit === true && params.maxTokens != null) payload.options.num_predict = params.maxTokens;
-    if (params.numCtxExplicit === true && params.numCtx != null) payload.options.num_ctx = params.numCtx;
+    if (shouldForwardNumCtx(params, { kind: 'ollama', baseUrl: base })) payload.options.num_ctx = params.numCtx;
     applyOllamaThinking(payload, params);
     if (tools?.length) {
       payload.tools = tools.map(openAiToolToOllama);
@@ -398,12 +495,14 @@ export async function proxyChat(body, { write, onClose }) {
     if (params.temperature != null) payload.temperature = params.temperature;
     if (params.topP != null) payload.top_p = params.topP;
     if (params.maxTokensExplicit === true && params.maxTokens != null) payload.max_tokens = params.maxTokens;
-    // Ollama's OpenAI route honors options.num_ctx. Send it only when the
-    // user explicitly set a context, and only to an Ollama port, so a model
-    // tag's own context (for example 193000) is not used and other servers
-    // are left unchanged.
-    if (/:11434(\/|$)/.test(base) && params.numCtxExplicit === true && params.numCtx != null) {
+    // Ollama's OpenAI route honors options.num_ctx. llama.cpp keeps the
+    // context it was launched with; a lower num_ctx is not sent to it.
+    if (shouldForwardNumCtx(params, { kind: 'openai', baseUrl: base })) {
       payload.options = { num_ctx: params.numCtx };
+    }
+    if (params.think === 'enabled' || params.think === 'disabled') {
+      const support = await detectOpenAiThinkingSupport(base, headers);
+      thinkingControl = applyOpenAiThinking(payload, params, support);
     }
     if (tools?.length) {
       payload.tools = tools;
@@ -490,6 +589,8 @@ export async function proxyChat(body, { write, onClose }) {
       try { chunk = JSON.parse(data); } catch { return; }
       const choice = chunk.choices?.[0];
       if (chunk.error) { write({ t: 'error', message: String(chunk.error.message || chunk.error) }); return; }
+      const reasoning = choice?.delta?.reasoning_content ?? choice?.delta?.reasoning;
+      if (reasoning) write({ t: 'thinking', v: reasoning });
       if (choice?.delta?.content) write({ t: 'text', v: choice.delta.content });
       if (choice?.delta?.tool_calls) {
         for (const tc of choice.delta.tool_calls) {
@@ -544,7 +645,7 @@ export async function proxyChat(body, { write, onClose }) {
         else { args = a.argsStr; argsState = 'string'; }
         return { id: a.id || `call_${i}`, name: a.name, args, argsState };
       });
-  write({ t: 'end', finish: finish || 'stop', toolCalls, usage });
+  write({ t: 'end', finish: finish || 'stop', toolCalls, usage, thinkingControl });
   clearTimeout(abortTimer); // successful completion — stop the inference timer
 }
 

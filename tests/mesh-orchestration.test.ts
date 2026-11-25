@@ -284,8 +284,10 @@ describe('coordinator — 3-node orchestration with a shared workspace (spec §6
     expect(report.verdict).toBe('APPROVE');
     expect(report.results.every((r) => r.summary.length > 0)).toBe(true);
 
-    // shared task progress: notebook has one handoff per agent
-    expect(mesh.notebook.length).toBe(4);
+    // one handoff per stage, plus the coordinator's objective record
+    expect(mesh.notebook.filter((entry) => entry.agentId !== 'coordinator')).toHaveLength(4);
+    expect(mesh.notebook.some((entry) => String(entry.content).includes('[objective'))).toBe(true);
+    expect(mesh.notebook).toHaveLength(5);
     expect(mesh.notebook[1].content).toContain('Windows Dell');
 
     // private memory: scratchpads per agent with progress state (agent ids use

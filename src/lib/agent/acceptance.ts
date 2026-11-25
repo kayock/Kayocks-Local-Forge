@@ -1,5 +1,6 @@
 // Objective acceptance for software collaborations. This is separate from the
 // reviewer's own VERDICT line: that text is preserved and never rewritten.
+import { checkAcceptanceCommands } from './collab-policy';
 
 export type ObjectiveStatus = 'PASS' | 'FAIL' | 'INCOMPLETE' | 'NOT TESTED' | 'NOT_APPLICABLE';
 
@@ -52,6 +53,7 @@ export function evaluateObjectiveAcceptance(input: {
   evidence: TestEvidence[];
   runId: string;
   revision: string | null;
+  requiredCommands?: string[];
 }): ObjectiveAcceptance {
   const reviewerVerdict = input.reviewerVerdict;
   if (!input.applicable) {
@@ -63,7 +65,34 @@ export function evaluateObjectiveAcceptance(input: {
     };
   }
   const evidence = currentEvidence(input.evidence, input.runId, input.revision);
-  if (evidence.length === 0) {
+  const required = input.requiredCommands ?? [];
+  if (required.length > 0) {
+    const check = checkAcceptanceCommands(evidence, required);
+    if (check.missing.length > 0) {
+      const substitute = check.substitutes.length
+        ? ` A different command passed (${check.substitutes.join('; ')}) and does not replace the required command.`
+        : '';
+      return {
+        status: 'NOT TESTED',
+        reason: `Required acceptance command was not executed: ${check.missing.join('; ')}.${substitute}`,
+        reviewerVerdict,
+        evidence,
+      };
+    }
+    if (check.failed.length > 0) {
+      const first = check.failed[0];
+      return {
+        status: 'FAIL',
+        reason: `${first.command} exited ${first.exitCode ?? 'without a code'}.`,
+        reviewerVerdict,
+        evidence,
+      };
+    }
+  }
+  const gated = required.length
+    ? evidence.filter((item) => required.some((command) => checkAcceptanceCommands([item], [command]).passed.length === 1))
+    : evidence;
+  if (gated.length === 0) {
     return {
       status: 'NOT TESTED',
       reason: 'No test command was executed for this collaboration run and workspace revision.',
@@ -71,7 +100,8 @@ export function evaluateObjectiveAcceptance(input: {
       evidence,
     };
   }
-  const failed = evidence.filter((item) => item.exitCode !== 0);
+  const judged = required.length ? gated : evidence;
+  const failed = judged.filter((item) => item.exitCode !== 0);
   if (failed.length > 0) {
     const first = failed[0];
     return {
@@ -81,8 +111,8 @@ export function evaluateObjectiveAcceptance(input: {
       evidence,
     };
   }
-  const skipped = evidence.filter((item) => /\b(skipped|no tests|not executed)\b/i.test(item.output) && !/\backnowledg/i.test(item.output));
-  const passed = evidence.some((item) => /\b[1-9]\d*\s+(pass|passed|passing)\b/i.test(item.output) || /\bok\s+\d+\b/i.test(item.output));
+  const skipped = judged.filter((item) => /\b(skipped|no tests|not executed)\b/i.test(item.output) && !/\backnowledg/i.test(item.output));
+  const passed = judged.some((item) => /\b[1-9]\d*\s+(pass|passed|passing)\b/i.test(item.output) || /\bok\s+\d+\b/i.test(item.output));
   if (skipped.length > 0 && !passed) {
     return {
       status: 'INCOMPLETE',
@@ -91,7 +121,7 @@ export function evaluateObjectiveAcceptance(input: {
       evidence,
     };
   }
-  if (!evidence.some((item) => substantiveOutput(item.output || ''))) {
+  if (!judged.some((item) => substantiveOutput(item.output || ''))) {
     return {
       status: 'INCOMPLETE',
       reason: 'A command reported success without any captured output to check.',
@@ -101,7 +131,9 @@ export function evaluateObjectiveAcceptance(input: {
   }
   return {
     status: 'PASS',
-    reason: `${evidence.length} test command${evidence.length === 1 ? '' : 's'} completed with captured output.`,
+    reason: required.length
+      ? `Required acceptance command passed: ${required.join('; ')}.`
+      : `${judged.length} test command${judged.length === 1 ? '' : 's'} completed with captured output.`,
     reviewerVerdict,
     evidence,
   };

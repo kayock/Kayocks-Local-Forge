@@ -507,6 +507,10 @@ export class CompanionClient {
     return this.req<{ models: ModelInfo[] }>('POST', '/api/providers/models', { provider });
   }
 
+  readServerContext(provider: ProviderConfig, model: string) {
+    return this.req<{ context: { tokens: number | null; source: string; verified: boolean; trainTokens?: number | null; note?: string } }>('POST', '/api/providers/context', { provider, model });
+  }
+
   loadModel(provider: ProviderConfig, model: string, keepAlive?: string) {
     return this.req<{ ok: boolean; message: string }>('POST', '/api/models/load', { provider, model, keepAlive });
   }
