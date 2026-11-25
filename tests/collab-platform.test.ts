@@ -108,7 +108,8 @@ beforeAll(async () => {
   await fsp.writeFile(path.join(WS_B, 'app.py'), 'value = "hi"\n');
 
   stubAUrl = await startStub(8281, [
-    { toolCalls: [{ id: 'p1', name: 'finish', args: { summary: 'PLAN for the windows project' } }] },
+    { toolCalls: [{ id: 'p1', name: 'finish', args: { summary: 'PLAN:\n1. Fix the value in app.py' } }] },
+    { toolCalls: [{ id: 'r0', name: 'read_file', args: { path: 'app.py' } }] },
     { toolCalls: [{ id: 'r1', name: 'finish', args: { summary: 'VERDICT: APPROVE — windows workspace verified' } }] },
   ]);
   stubBUrl = await startStub(8282, [

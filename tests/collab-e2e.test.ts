@@ -128,6 +128,7 @@ beforeAll(async () => {
   };
   stubAUrl = await startStub(8181, [
     { toolCalls: [{ id: 'p1', name: 'finish', args: { summary: 'PLAN:\n1. Fix greeting in app.py\n2. Verify with a command' } }] },
+    { toolCalls: [{ id: 'r0', name: 'read_file', args: { path: 'app.py' } }] },
     { toolCalls: [{ id: 'r1', name: 'finish', args: { summary: 'VERDICT: APPROVE — greeting fixed and verified' } }] },
   ]);
   stubBUrl = await startStub(8182, [

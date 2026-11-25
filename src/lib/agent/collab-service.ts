@@ -144,6 +144,9 @@ export async function launchCollaborativeTask(
     onEvent: (e: AgentEvent & { stage?: string; agentId?: string; assignmentId?: string }) => void;
     approver?: (req: { tool: string; args: Record<string, unknown>; danger: string; summary: string }) => Promise<'allow' | 'allow-always' | 'deny'>;
     signal?: AbortSignal;
+    // Tests inject the scripted companion. The IDE omits this and uses the
+    // signed-in companion connection.
+    clientForMachine?: (machineId: string) => CompanionClient;
   },
 ): Promise<CollabLaunch> {
   if (!cfg.objective.trim()) throw new CollabConfigError('Enter a development objective first.');
@@ -210,7 +213,7 @@ export async function launchCollaborativeTask(
     params: cfg.params,
     onEvent: opts.onEvent,
     approver: opts.approver,
-    clientForMachine: (id) => clientForMachine(id === 'local' ? null : id),
+    clientForMachine: opts.clientForMachine ?? ((id) => clientForMachine(id === 'local' ? null : id)),
     ensureModelLoaded,
   });
   if (cfg.executionMode === 'parallel') coordinator.enableParallelWriters();

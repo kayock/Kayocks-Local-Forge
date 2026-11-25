@@ -29,8 +29,13 @@ import { paramsWithThinking, type ThinkingMode } from './thinking';
 import {
   checkAcceptanceCommands,
   extractAcceptanceCommands,
+  assessReviewEvidence,
   parseReviewerVerdict,
+  planningDeliverable,
+  requiredReviewPaths,
   reviewFollowup,
+  reviewReads,
+  type PlanningStatus,
   type CollaborationCompletion,
   type ReviewerVerdict,
 } from './collab-policy';
@@ -107,6 +112,7 @@ export interface CoordinatorReport {
   results: { stage: StageId; assignmentId: string; agentId: string; machine: string; model: string; summary: string; turns: number; conflict?: string | null; escalated?: boolean; hitTurnLimit?: boolean }[];
   verdict: ReviewerVerdict;
   completion: CollaborationCompletion;
+  planning: PlanningStatus;
   reworkPassesUsed: number;
   totalTurns: number;
   conflicts: string[];
@@ -129,11 +135,6 @@ function stagePrompt(stage: StageId, ctx: WorkspaceContext): string {
     case 'reviewer': return reviewerPrompt(ctx);
     case 'debugger': return debuggerPrompt(ctx);
   }
-}
-
-function extractAfter(text: string, heading: string): string {
-  const idx = text.lastIndexOf(heading);
-  return idx >= 0 ? text.slice(idx + heading.length).trim() : text.trim();
 }
 
 export class Coordinator {
@@ -244,14 +245,19 @@ export class Coordinator {
     ].join('\n');
   }
 
-  private stageTask(stage: StageId, plan: string, prior: { coder?: string; test?: string; review?: string; issue?: string }): string {
+  private stageTask(stage: StageId, plan: string, prior: { coder?: string; test?: string; review?: string; issue?: string; reviewFiles?: string[] }): string {
     const task = this.cfg.task;
     const acceptance = this.acceptanceBlock();
     switch (stage) {
       case 'planner': return [`Plan this task:\n\n${task}`, acceptance, 'Use only your planner tools. The workspace summary in your instructions is already available.'].filter(Boolean).join('\n\n');
       case 'coder': return [`Implement this plan in the shared workspace (your tools operate on the authoritative project — other agents may be editing other files; do not revert their work).\n\nTASK:\n${task}\n\nPLAN:\n${plan}`, acceptance].filter(Boolean).join('\n\n');
       case 'tester': return [`Verify the implementation of this task by executing the tests yourself. The coder summary is a claim, not evidence.\n${task}\n\nPlan that was implemented:\n${plan}\n\nCoder summary:\n${prior.coder ?? ''}`, acceptance].filter(Boolean).join('\n\n');
-      case 'reviewer': return `Review this implementation:\n\nTASK:\n${task}\n\nCoder summary:\n${prior.coder ?? ''}\n\nTester report:\n${prior.test ?? ''}\n\nYour finish summary must end with VERDICT: APPROVE, VERDICT: REQUEST_CHANGES, or VERDICT: BLOCKED.`;
+      case 'reviewer': {
+        const files = prior.reviewFiles?.length
+          ? `Before VERDICT: APPROVE, call read_file on each of these files: ${prior.reviewFiles.join(', ')}. list_dir alone is not inspection.`
+          : 'Before VERDICT: APPROVE, call read_file on the implementation and its test. list_dir alone is not inspection.';
+        return `Review this implementation:\n\nTASK:\n${task}\n\nCoder summary:\n${prior.coder ?? ''}\n\nTester report:\n${prior.test ?? ''}\n\n${files}\n\nYour finish summary must end with VERDICT: APPROVE, VERDICT: REQUEST_CHANGES, or VERDICT: BLOCKED.`;
+      }
       case 'debugger': return [`Diagnose and FIX the reported failure, then re-run the same acceptance command:\n\n${prior.issue}\n\nOriginal task:\n${task}`, acceptance].filter(Boolean).join('\n\n');
     }
   }
@@ -420,6 +426,8 @@ export class Coordinator {
   private stopRequested = false;
   private runId = '';
   private testEvidence: TestEvidence[] = [];
+  private planning: PlanningStatus = 'MISSING';
+  private reviewEvidenceMissing = false;
   lastRunResults: CoordinatorReport['results'] = [];
 
   /** Allow parallel coder agents (spec §6). Overlapping writes are detected via revisions. */
@@ -527,6 +535,8 @@ export class Coordinator {
   async run(explicitTargets?: Partial<Record<StageId, AgentTarget>>): Promise<CoordinatorReport> {
     this.runId = `collab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     this.testEvidence = [];
+    this.planning = 'MISSING';
+    this.reviewEvidenceMissing = false;
     const reworkLimit = this.cfg.reworkPasses ?? 1;
     let reworkUsed = 0;
     let totalTurns = 0;
@@ -540,10 +550,22 @@ export class Coordinator {
     results.push({ stage: 'planner', assignmentId: planRun.assignment.id, agentId: planRun.assignment.agentId, machine: planAssign.target.machineName, model: planAssign.target.model, summary: planRun.r.content || planRun.r.note || '(no summary returned)', turns: planRun.r.turns, conflict: planRun.conflict, escalated: false, hitTurnLimit: planRun.r.hitTurnLimit });
     if (planRun.conflict) conflicts.push(planRun.conflict);
     if (planRun.r.paused) return this.report(results, 'UNKNOWN', reworkUsed, totalTurns, conflicts, 'paused');
-    const plan = extractAfter(planRun.r.content || '(no summary returned)', 'PLAN:');
+    let deliverable = planningDeliverable(planRun.r.content || '', planRun.r.messages || []);
+    if (deliverable.status === 'MISSING') {
+      this.cfg.onEvent({ type: 'notice', message: 'Planner omitted the PLAN: section. Asking once. A rejected tool call did not create a file, and this is not a completed plan.' });
+      const planRetry = await this.runAgent('planner', planAssign.target, 'Your previous reply had no PLAN: section, so planning is not complete. A rejected tool call did not create or change any file. Do not claim that a file exists. Call finish. The summary must contain a section titled PLAN: with numbered steps and the exact acceptance command. Do not call write_file, edit_file, list_dir, or run_command.', []);
+      totalTurns += planRetry.r.turns;
+      results.push({ stage: 'planner', assignmentId: planRetry.assignment.id, agentId: planRetry.assignment.agentId, machine: planAssign.target.machineName, model: planAssign.target.model, summary: planRetry.r.content || planRetry.r.note || '(no summary returned)', turns: planRetry.r.turns, conflict: planRetry.conflict, escalated: false, hitTurnLimit: planRetry.r.hitTurnLimit });
+      if (planRetry.conflict) conflicts.push(planRetry.conflict);
+      if (planRetry.r.paused && !planRetry.r.hitTurnLimit) return this.report(results, 'UNKNOWN', reworkUsed, totalTurns, conflicts, 'paused');
+      deliverable = planningDeliverable(planRetry.r.content || '', [...(planRun.r.messages || []), ...(planRetry.r.messages || [])]);
+    }
+    this.planning = deliverable.status;
+    const plan = deliverable.plan;
 
     // 2. CODER (+ optional rework/debugger loops)
     let coderSummary = '';
+    let coderFiles: string[] = [];
     let testReport = '';
     let review = '';
     let verdict: CoordinatorReport['verdict'] = 'UNKNOWN';
@@ -553,6 +575,7 @@ export class Coordinator {
       const coderRun = await this.runAgent('coder', coderAssign.target, this.stageTask('coder', plan, { issue: pass > 0 ? review : undefined }), []);
       totalTurns += coderRun.r.turns;
       coderSummary = coderRun.r.content || coderRun.r.note || '(no summary returned)';
+      coderFiles = [...coderFiles, ...(coderRun.r.filesChanged || [])];
       results.push({ stage: 'coder', assignmentId: coderRun.assignment.id, agentId: coderRun.assignment.agentId, machine: coderAssign.target.machineName, model: coderAssign.target.model, summary: coderSummary, turns: coderRun.r.turns, conflict: coderRun.conflict, escalated: false, hitTurnLimit: coderRun.r.hitTurnLimit });
       if (coderRun.conflict) conflicts.push(coderRun.conflict);
       // Turn limit ≠ user pause: the pipeline still proceeds to verification
@@ -600,32 +623,46 @@ export class Coordinator {
         if (reviewerRun.conflict) conflicts.push(reviewerRun.conflict);
         return reviewerRun;
       };
-      const firstReview = await runReviewer(this.stageTask('reviewer', plan, { coder: coderSummary, test: testReport }));
+      const reviewPaths = requiredReviewPaths({ changedFiles: coderFiles, task: this.cfg.task, plan });
+      const reviewerMessages: { role?: string; content?: string; name?: string; toolCalls?: { name?: string; args?: Record<string, unknown> }[] }[] = [];
+      const firstReview = await runReviewer(this.stageTask('reviewer', plan, { coder: coderSummary, test: testReport, reviewFiles: reviewPaths }));
+      reviewerMessages.push(...(firstReview.r.messages || []));
       if (firstReview.r.paused) return this.report(results, 'UNKNOWN', reworkUsed, totalTurns, conflicts, 'paused');
       verdict = parseReviewerVerdict(review);
-      const inspected = (messages: { name?: string }[] | undefined) =>
-        (messages || []).some((message) => message.name === 'read_file' || message.name === 'list_dir');
+      let verdictRetries = 0;
+      let evidenceRetries = 0;
       if (verdict === 'UNKNOWN') {
-        this.cfg.onEvent({ type: 'notice', message: 'Reviewer omitted the verdict line. Asking once for VERDICT: APPROVE, VERDICT: REQUEST_CHANGES, or VERDICT: BLOCKED. This is not a request for changes.' });
-        const reviewerRetry = await runReviewer(`Your previous review omitted the required verdict line. Do not turn that omission into a request for changes.\n\nPrevious review:\n${review}\n\nCall finish. End the summary with exactly one line: VERDICT: APPROVE, VERDICT: REQUEST_CHANGES, or VERDICT: BLOCKED.`);
-        if (reviewerRetry.r.paused) return this.report(results, verdict, reworkUsed, totalTurns, conflicts, 'paused');
-        verdict = parseReviewerVerdict(review);
-      } else if (required.length && !inspected(firstReview.r.messages)) {
-        this.cfg.onEvent({ type: 'notice', message: 'Reviewer returned a verdict without reading the implementation. Asking once for a file read. This is not a request for changes.' });
-        const reviewerRetry = await runReviewer('You have not read the implementation. Call list_dir or read_file on the files named in the task, then call finish. End with exactly one verdict line: VERDICT: APPROVE, VERDICT: REQUEST_CHANGES, or VERDICT: BLOCKED. Do not approve from another agent\'s summary alone.');
+        verdictRetries = 1;
+        const files = reviewPaths.length ? reviewPaths.join(', ') : 'the implementation and its test';
+        this.cfg.onEvent({ type: 'notice', message: 'Reviewer omitted the verdict line. Asking once for a file read and VERDICT: APPROVE, VERDICT: REQUEST_CHANGES, or VERDICT: BLOCKED. This is not a request for changes.' });
+        const reviewerRetry = await runReviewer(`Your previous review omitted the required verdict line. Do not turn that omission into a request for changes. Call read_file on: ${files}. Then call finish. End the summary with exactly one line: VERDICT: APPROVE, VERDICT: REQUEST_CHANGES, or VERDICT: BLOCKED.`);
+        reviewerMessages.push(...(reviewerRetry.r.messages || []));
         if (reviewerRetry.r.paused) return this.report(results, verdict, reworkUsed, totalTurns, conflicts, 'paused');
         verdict = parseReviewerVerdict(review);
       }
+      let evidence = assessReviewEvidence(reviewReads(reviewerMessages), reviewPaths);
+      if (verdict === 'APPROVE' && !evidence.sufficient && evidenceRetries < 1 && verdictRetries === 0) {
+        evidenceRetries = 1;
+        this.cfg.onEvent({ type: 'notice', message: `Reviewer approved without reading ${evidence.missing.join(', ') || 'the implementation'}. Asking once for that inspection. This is not a request for changes.` });
+        const reviewerRetry = await runReviewer(`Your approval did not include a successful read_file of the implementation, so it is not accepted. This is not a request for changes. Call read_file on: ${evidence.missing.join(', ') || 'the implementation and its test'}. Then call finish. End with exactly one line: VERDICT: APPROVE, VERDICT: REQUEST_CHANGES, or VERDICT: BLOCKED.`);
+        reviewerMessages.push(...(reviewerRetry.r.messages || []));
+        if (reviewerRetry.r.paused) return this.report(results, verdict, reworkUsed, totalTurns, conflicts, 'paused');
+        verdict = parseReviewerVerdict(review);
+        evidence = assessReviewEvidence(reviewReads(reviewerMessages), reviewPaths);
+      }
+      this.reviewEvidenceMissing = verdict === 'APPROVE' && !evidence.sufficient;
 
       const follow = reviewFollowup({
         verdict,
-        verdictRetriesUsed: 1,
+        verdictRetriesUsed: verdictRetries > 0 ? 1 : 0,
         requiredMissing: check.missing.length > 0,
         requiredFailed: check.failed.length > 0,
         testerRetriesUsed: 1,
         reworkUsed,
         reworkLimit,
         testerProducedEvidence: evidenceNow().length > 0,
+        evidenceMissing: this.reviewEvidenceMissing,
+        evidenceRetriesUsed: evidenceRetries,
       });
       if (follow.action === 'stop') break;
       if (follow.action !== 'debugger') break;
@@ -650,6 +687,7 @@ export class Coordinator {
       const dbgRun = await this.runAgent('debugger', dbgAssign.target, this.stageTask('debugger', plan, { issue }), []);
       totalTurns += dbgRun.r.turns;
       coderSummary += `\n\n[Rework pass ${reworkUsed} — debugger on ${dbgAssign.target.machineName}] ${dbgRun.r.content}`;
+      coderFiles = [...coderFiles, ...(dbgRun.r.filesChanged || [])];
       results.push({ stage: 'debugger', assignmentId: dbgRun.assignment.id, agentId: dbgRun.assignment.agentId, machine: dbgAssign.target.machineName, model: dbgAssign.target.model, summary: dbgRun.r.content || dbgRun.r.note || '(no summary returned)', turns: dbgRun.r.turns, conflict: dbgRun.conflict, escalated, hitTurnLimit: dbgRun.r.hitTurnLimit });
       if (dbgRun.conflict) conflicts.push(dbgRun.conflict);
       if (dbgRun.r.paused) return this.report(results, verdict, reworkUsed, totalTurns, conflicts, 'paused');
@@ -691,14 +729,16 @@ export class Coordinator {
           ? 'NOT_TESTED'
           : verdict === 'UNKNOWN'
             ? 'VERDICT_MISSING'
-            : verdict === 'REQUEST_CHANGES'
-              ? 'CHANGES_REQUESTED'
-              : verdict === 'BLOCKED'
-                ? 'BLOCKED'
-                : verdict === 'APPROVE' && objectiveAcceptance.status === 'PASS'
-                  ? 'ACCEPTED'
-                  : 'INCOMPLETE';
-    const verdictNotice = `Reviewer verdict: ${verdict}. Completion: ${completion}. Objective acceptance: ${objectiveAcceptance.status}. ${objectiveAcceptance.reason}`;
+            : verdict === 'APPROVE' && this.reviewEvidenceMissing
+              ? 'REVIEW_EVIDENCE_MISSING'
+              : verdict === 'REQUEST_CHANGES'
+                ? 'CHANGES_REQUESTED'
+                : verdict === 'BLOCKED'
+                  ? 'BLOCKED'
+                  : verdict === 'APPROVE' && objectiveAcceptance.status === 'PASS' && !this.reviewEvidenceMissing
+                    ? 'ACCEPTED'
+                    : 'INCOMPLETE';
+    const verdictNotice = `Planning: ${this.planning}. Reviewer verdict: ${verdict}. Completion: ${completion}. Objective acceptance: ${objectiveAcceptance.status}. ${objectiveAcceptance.reason}${this.reviewEvidenceMissing ? ' Review inspection evidence is missing, so this approval is not accepted.' : ''}`;
     if (state === 'paused') {
       this.cfg.onEvent({ type: 'paused', turn: turns, note: 'Coordinator paused — all agent assignments and scratchpads are persisted on the workspace host.' });
     } else {
@@ -715,6 +755,7 @@ export class Coordinator {
       results,
       verdict,
       completion,
+      planning: this.planning,
       reworkPassesUsed: rework,
       totalTurns: turns,
       conflicts,

@@ -1071,7 +1071,7 @@ function CollaborateTab() {
       mesh.refreshAssignments(wsRec.id);
       mesh.refreshNotebook(wsRec.id);
       const fanoutCounts = (r as any).fanout ? ` — ${((r as any).fanout.completed)} completed, ${((r as any).fanout.failed)} failed` : '';
-      pushFeed(`${handle.kind === 'fanout' ? 'Fan-out' : 'Coordinator'} finished — verdict: ${r.verdict}, ${r.totalTurns} turns${r.conflicts.length ? `, ${r.conflicts.length} conflict(s)` : ''}${fanoutCounts}.`);
+      pushFeed(`${handle.kind === 'fanout' ? 'Fan-out' : 'Coordinator'} finished — verdict: ${r.verdict}${r.completion ? `, completion: ${r.completion}` : ''}${r.planning ? `, planning: ${r.planning}` : ''}, ${r.totalTurns} turns${r.conflicts.length ? `, ${r.conflicts.length} conflict(s)` : ''}${fanoutCounts}.`);
     } catch (e: any) {
       setError(String(e.message || e));
     } finally {
@@ -1365,6 +1365,9 @@ function CollaborateTab() {
       {report && (
         <div className="rounded-lg border p-3 space-y-2 text-xs">
           <p className="text-sm font-medium">Reviewer verdict: <Badge variant="outline" className={report.verdict === 'APPROVE' ? 'text-green-600 border-green-500/40' : 'text-yellow-600'}>{report.verdict}</Badge></p>
+          {report.completion && (
+            <p className="text-sm">Completion: <Badge variant="outline" className={report.completion === 'ACCEPTED' ? 'text-green-600 border-green-500/40' : 'text-yellow-600'}>{report.completion}</Badge>{report.planning ? <span className="text-muted-foreground"> · Planning: {report.planning}</span> : null}</p>
+          )}
           {report.objectiveAcceptance && (
             <p className="text-sm">Objective acceptance: <Badge variant="outline" className={report.objectiveAcceptance.status === 'PASS' ? 'text-green-600 border-green-500/40' : 'text-yellow-600'}>{report.objectiveAcceptance.status}</Badge> <span className="text-muted-foreground">{report.objectiveAcceptance.reason}</span></p>
           )}

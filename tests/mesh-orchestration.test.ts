@@ -228,6 +228,7 @@ describe('coordinator — 3-node orchestration with a shared workspace (spec §6
     { toolCalls: [{ id: 't2', name: 'finish', args: { summary: 'tests pass on portable-run tester' } }] },
   ];
   station.chatScript.push(
+    { toolCalls: [{ id: 'r0', name: 'read_file', args: { path: 'app.py' } }] },
     { toolCalls: [{ id: 'r1', name: 'finish', args: { summary: 'VERDICT: APPROVE — looks good' } }] },
   );
 
@@ -282,6 +283,8 @@ describe('coordinator — 3-node orchestration with a shared workspace (spec §6
 
     // completion reporting: verdict + results
     expect(report.verdict).toBe('APPROVE');
+    expect(report.planning).toBe('DELIVERED');
+    expect(report.completion).toBe('ACCEPTED');
     expect(report.results.every((r) => r.summary.length > 0)).toBe(true);
 
     // one handoff per stage, plus the coordinator's objective record
@@ -299,6 +302,89 @@ describe('coordinator — 3-node orchestration with a shared workspace (spec §6
     // durable assignments on the workspace host
     expect(mesh.assignments.length).toBe(4);
     expect(mesh.assignments.every((a) => a.status === 'done' && a.turns > 0)).toBe(true);
+  });
+});
+
+describe('coordinator acceptance gates', () => {
+  function runCollab(scripts: { station: any[]; coder: any[]; tester: any[] }, task: string) {
+    const station = makeCompanion({ files: { 'work/mul.py': 'def mul(a, b):\n    return a * b\n' } });
+    const coder = makeCompanion();
+    const tester = makeCompanion();
+    station.chatScript = scripts.station;
+    coder.chatScript = scripts.coder;
+    tester.chatScript = scripts.tester;
+    const machines: AgentTarget[] = [
+      { machineId: 'local', machineName: 'Station', provider: { kind: 'openai', baseUrl: 'http://station/v1' }, model: 'q4' },
+      { machineId: 'coder', machineName: 'Coder', provider: { kind: 'openai', baseUrl: 'http://coder/v1' }, model: 'q4' },
+      { machineId: 'tester', machineName: 'Tester', provider: { kind: 'openai', baseUrl: 'http://tester/v1' }, model: 'f16' },
+    ];
+    const coordinator = new Coordinator({
+      workspaceHost: station,
+      workspaceId: 'ws-gate',
+      workspacePath: '/ws',
+      workspaceContext: { platform: 'linux', workspacePath: '/ws' },
+      mesh: makeMeshFake(station),
+      task,
+      machines,
+      maxTurnsPerStage: 6,
+      onEvent: () => {},
+      clientForMachine: (id) => (id === 'coder' ? coder : id === 'tester' ? tester : station),
+      approver: async () => 'allow',
+    });
+    return {
+      coder,
+      report: coordinator.run({ planner: machines[0], coder: machines[1], tester: machines[2], reviewer: machines[0] }),
+    };
+  }
+
+  test('approval without reading the implementation is not accepted and does not debug', async () => {
+    const launched = runCollab({
+      station: [
+        { toolCalls: [{ id: 'p1', name: 'finish', args: { summary: 'PLAN:\n1. Keep work/mul.py\n2. Run python3 -m unittest work.test_mul' } }] },
+        { toolCalls: [{ id: 'r1', name: 'finish', args: { summary: 'VERDICT: APPROVE' } }] },
+      ],
+      coder: [
+        { toolCalls: [{ id: 'c1', name: 'write_file', args: { path: 'work/mul.py', content: 'def mul(a, b):\n    return a * b\n' } }] },
+        { toolCalls: [{ id: 'c2', name: 'finish', args: { summary: 'wrote work/mul.py' } }] },
+      ],
+      tester: [
+        { toolCalls: [{ id: 't1', name: 'run_command', args: { command: 'python3 -m unittest work.test_mul' } }] },
+        { toolCalls: [{ id: 't2', name: 'finish', args: { summary: 'ran the acceptance command' } }] },
+      ],
+    }, 'Update work/mul.py. Acceptance command: python3 -m unittest work.test_mul');
+    const report = await launched.report;
+    expect(report.verdict).toBe('APPROVE');
+    expect(report.planning).toBe('DELIVERED');
+    expect(report.completion).toBe('REVIEW_EVIDENCE_MISSING');
+    expect(report.objectiveAcceptance.status).toBe('PASS');
+    expect(report.results.filter((result) => result.stage === 'reviewer')).toHaveLength(2);
+    expect(report.results.some((result) => result.stage === 'debugger')).toBe(false);
+  });
+
+  test('a missing verdict stays missing and a rejected planner write is not a created file', async () => {
+    const launched = runCollab({
+      station: [
+        { toolCalls: [{ id: 'p0', name: 'write_file', args: { path: 'work/mul.py', content: 'nope' } }] },
+        { toolCalls: [{ id: 'p1', name: 'finish', args: { summary: 'I created work/mul.py.' } }] },
+        { toolCalls: [{ id: 'r1', name: 'finish', args: { summary: 'The code looks fine.' } }] },
+      ],
+      coder: [
+        { toolCalls: [{ id: 'c1', name: 'finish', args: { summary: 'left the file alone' } }] },
+      ],
+      tester: [
+        { toolCalls: [{ id: 't1', name: 'run_command', args: { command: 'python3 -m unittest work.test_mul' } }] },
+        { toolCalls: [{ id: 't2', name: 'finish', args: { summary: 'ran tests' } }] },
+      ],
+    }, 'Update work/mul.py.');
+    const report = await launched.report;
+    expect(report.planning).toBe('MISSING');
+    expect(report.results.filter((result) => result.stage === 'planner')).toHaveLength(2);
+    expect(report.verdict).toBe('UNKNOWN');
+    expect(report.completion).toBe('VERDICT_MISSING');
+    expect(report.results.some((result) => result.stage === 'debugger')).toBe(false);
+    const coderTask = JSON.stringify(launched.coder.chatCalls[0].messages);
+    expect(coderTask).toContain('Planning deliverable: MISSING');
+    expect(coderTask).toContain('write_file work/mul.py was rejected');
   });
 });
 

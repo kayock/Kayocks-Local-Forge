@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.5.0 RC6 — review evidence and deployment alignment (v0.5-dev, 2026-11-24)
+
+A reviewer `VERDICT: APPROVE` is not acceptance unless that reviewer successfully read the files this task changed. A directory listing does not count, and a failed read does not count. The requirement stays on the changed implementation and tests, capped so a large tree is not read in full. Missing inspection gets one retry and then `REVIEW_EVIDENCE_MISSING`. It does not start the debugger. A missing verdict is still `VERDICT_MISSING`.
+
+A planner reply without a `PLAN:` section is a missing deliverable, not a completed plan. One retry asks for the section. A rejected planner tool call is recorded as a call that changed nothing, and that note is what the coder receives instead of the planner's claim.
+
+The text tool helper, context compaction, and backend thinking controls are unchanged.
+
 ## v0.5.0 RC5 — collaboration reliability (v0.5-dev, 2026-11-24)
 
 Context compaction now uses the smaller of an explicit participant limit and the context the running server actually allocated. A model's training context is ignored. When neither a live measurement nor an explicit limit is known, compaction does not assume 8192. Tool definitions and reserved output tokens are included in the budget. A lower `num_ctx` is not sent to a running llama.cpp server, and Ollama is not asked to shrink a context that is already loaded.

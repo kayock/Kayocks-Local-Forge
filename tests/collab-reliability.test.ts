@@ -14,7 +14,12 @@ import {
   commandsMatch,
   extractAcceptanceCommands,
   parseReviewerVerdict,
+  assessReviewEvidence,
+  completionFor,
+  planningDeliverable,
+  requiredReviewPaths,
   reviewFollowup,
+  reviewReads,
 } from '@/lib/agent/collab-policy';
 
 const RUN = 'reliability';
@@ -250,6 +255,105 @@ describe('reviewer verdict and coordinator follow-up', () => {
   test('BLOCKED is preserved and the last verdict line wins', () => {
     expect(parseReviewerVerdict('VERDICT: REQUEST_CHANGES\nVERDICT: APPROVE')).toBe('APPROVE');
     expect(parseReviewerVerdict('Cannot review the workspace.\nVERDICT: BLOCKED')).toBe('BLOCKED');
+    expect(reviewFollowup({
+      verdict: 'BLOCKED',
+      verdictRetriesUsed: 1,
+      requiredMissing: false,
+      requiredFailed: false,
+      testerRetriesUsed: 1,
+      reworkUsed: 0,
+      reworkLimit: 1,
+      testerProducedEvidence: true,
+      evidenceMissing: false,
+      evidenceRetriesUsed: 1,
+    })).toEqual({ action: 'stop', completion: 'BLOCKED' });
+  });
+
+  test('approval after reading the changed implementation and test is accepted', () => {
+    const required = requiredReviewPaths({
+      changedFiles: ['work/mul.py', 'work/test_mul.py', 'notes.md'],
+      task: 'Implement work/mul.py and work/test_mul.py. The tester must run `python3 -m unittest work.test_mul`.',
+      plan: '1. Create work/mul.py and work/test_mul.py',
+    });
+    expect(required).toEqual(['work/mul.py', 'work/test_mul.py']);
+    const reads = reviewReads([
+      { role: 'assistant', content: '{"tool":"read_file","args":{"path":"work/mul.py"}}' },
+      { role: 'user', content: '[TOOL RESULT] read_file \ndef mul(a, b):\n    return a * b\nContinue: reply with exactly one JSON tool call, or finish.' },
+      { role: 'assistant', toolCalls: [{ name: 'read_file', args: { path: 'work/test_mul.py' } }] },
+      { role: 'tool', name: 'read_file', content: 'from .mul import mul\n' },
+    ]);
+    expect(assessReviewEvidence(reads, required).sufficient).toBe(true);
+    expect(completionFor({
+      verdict: 'APPROVE',
+      requiredMissing: false,
+      requiredFailed: false,
+      testerProducedEvidence: true,
+      evidenceMissing: false,
+    })).toBe('ACCEPTED');
+  });
+
+  test('approval without inspection is not accepted and does not start the debugger', () => {
+    const required = requiredReviewPaths({
+      changedFiles: ['work/mul.py', 'work/test_mul.py'],
+      task: 'Implement work/mul.py and work/test_mul.py.',
+      plan: '',
+    });
+    const listedOnly = reviewReads([
+      { role: 'assistant', toolCalls: [{ name: 'list_dir', args: { path: '.' } }] },
+      { role: 'tool', name: 'list_dir', content: 'work/\n' },
+      { role: 'assistant', content: '{"tool":"read_file","args":{"path":"work/mul.py"}}' },
+      { role: 'user', content: '[TOOL RESULT] read_file (ERROR)\nUnknown tool "read_file" for this role.' },
+    ]);
+    const evidence = assessReviewEvidence(listedOnly, required);
+    expect(evidence.sufficient).toBe(false);
+    expect(evidence.missing).toEqual(['work/mul.py', 'work/test_mul.py']);
+    expect(reviewFollowup({
+      verdict: 'APPROVE',
+      verdictRetriesUsed: 1,
+      requiredMissing: false,
+      requiredFailed: false,
+      testerRetriesUsed: 1,
+      reworkUsed: 0,
+      reworkLimit: 1,
+      testerProducedEvidence: true,
+      evidenceMissing: true,
+      evidenceRetriesUsed: 0,
+    })).toEqual({ action: 'retry-reviewer', reason: 'evidence' });
+    expect(reviewFollowup({
+      verdict: 'APPROVE',
+      verdictRetriesUsed: 1,
+      requiredMissing: false,
+      requiredFailed: false,
+      testerRetriesUsed: 1,
+      reworkUsed: 0,
+      reworkLimit: 1,
+      testerProducedEvidence: true,
+      evidenceMissing: true,
+      evidenceRetriesUsed: 1,
+    })).toEqual({ action: 'stop', completion: 'REVIEW_EVIDENCE_MISSING' });
+  });
+
+  test('a large change set does not require reading every file', () => {
+    const required = requiredReviewPaths({
+      changedFiles: ['src/a.py', 'src/b.py', 'src/c.py', 'src/d.py', 'tests/test_a.py', 'tests/test_b.py', 'README.md'],
+      task: 'Update the src package.',
+      plan: '',
+    });
+    expect(required).toEqual(['tests/test_a.py', 'tests/test_b.py', 'src/a.py']);
+  });
+
+  test('a missing plan is not a successful plan, and a rejected write created nothing', () => {
+    const delivered = planningDeliverable('PLAN:\n1. Create work/mul.py\n2. Run python3 -m unittest work.test_mul', []);
+    expect(delivered.status).toBe('DELIVERED');
+    expect(delivered.plan).toContain('work/mul.py');
+    const missing = planningDeliverable('I created work/mul.py and the tests pass.', [
+      { role: 'assistant', content: '{"tool":"write_file","args":{"path":"work/mul.py","content":"x"}}' },
+      { role: 'user', content: '[TOOL RESULT] write_file (ERROR)\nUnknown tool "write_file" for this role. Available tools: finish.' },
+    ]);
+    expect(missing.status).toBe('MISSING');
+    expect(missing.plan).toContain('Planning deliverable: MISSING');
+    expect(missing.plan).toContain('write_file work/mul.py was rejected');
+    expect(missing.plan).toContain('Do not treat the planner\'s claims as created files.');
   });
 });
 
@@ -259,6 +363,7 @@ describe('role instructions and the text tool helper', () => {
     expect(prompt).toContain('list_dir');
     expect(prompt).toContain('MUST NOT CALL');
     expect(prompt).toContain('PLAN:');
+    expect(prompt).toContain('did not create');
     expect(prompt).not.toContain('Inspect before editing');
     const helper = fallbackSystemAddon();
     expect(helper).toContain('{"tool": "<tool_name>", "args": { ... }}');
@@ -274,6 +379,8 @@ describe('role instructions and the text tool helper', () => {
     expect(reviewer).toContain('VERDICT: REQUEST_CHANGES');
     expect(reviewer).toContain('VERDICT: BLOCKED');
     expect(reviewer).toContain('cannot run commands');
+    expect(reviewer).toContain('read_file');
+    expect(reviewer).toContain('not accepted');
   });
 
   test('an unavailable tool is rejected with the role catalog, not the global catalog', async () => {

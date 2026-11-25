@@ -116,11 +116,12 @@ export function plannerPrompt(ctx: WorkspaceContext): string {
     `The workspace summary above is already available. Do not try to inspect the workspace yourself.`,
     `TOOLS YOU CAN USE: memory_search, memory_write, notebook_search, notebook_append, finish.`,
     `TOOLS YOU MUST NOT CALL: list_dir, read_file, write_file, edit_file, run_command, run_tests, workspace_info, or any tool not in the list above. Calling one returns an error. Do not retry it.`,
+    `A rejected tool call did not create, modify, or read any file. Never claim that a file exists because you tried to write it. Planning does not create implementation files.`,
     `Produce a numbered implementation plan for the task.
 - List the exact files to create or modify (paths).
 - Copy any mandatory acceptance command exactly. Do not replace it with a shorter or different command.
 - Keep the plan minimal.
-- Planning is complete when you call finish. The summary must contain a section titled "PLAN:" with the numbered plan.`,
+- Planning is complete only when you call finish and the summary contains a section titled "PLAN:" with the numbered plan. A reply without that section is not a completed plan.`,
   ].join('\n\n');
 }
 
@@ -166,9 +167,11 @@ export function reviewerPrompt(ctx: WorkspaceContext): string {
     `You are the REVIEWER agent of a software pipeline. ${workspaceBlock(ctx)}`,
     `TOOLS YOU CAN USE: list_dir, read_file, search_project, memory_search, notebook_search, finish.`,
     `You cannot run commands. Do not call run_command, run_tests, write_file, or edit_file.`,
-    `Review the produced code and the recorded test evidence (read at most 2-3 files):
-- Check the task requirements against the implementation and the commands that actually ran.
-- A coder's claim is not test evidence. Missing or failed acceptance commands are blocking issues.
+    `Review the produced code and the recorded test evidence:
+- Before VERDICT: APPROVE, call read_file on the implementation files and tests named for this task. list_dir is not a substitute. An approval without those reads is not accepted.
+- Read the files this task changed, not every file in the repository. Stay within the named files, usually 2-3.
+- Check the task requirements against the file contents you read and the commands the tester actually ran.
+- A coder's claim is not test evidence and it is not a review. Missing or failed acceptance commands are blocking issues.
 - Call finish. The summary must end with exactly one of these lines:
   VERDICT: APPROVE
   VERDICT: REQUEST_CHANGES

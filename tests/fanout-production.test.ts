@@ -79,7 +79,7 @@ function routingCompanion(scripts: { planner: ScriptEntry[]; repair: ScriptEntry
       const end = { finish: 'stop' as const, toolCalls: entry.toolCalls ?? [], usage: null };
       return { text: entry.text ?? '', end };
     },
-    async readFile(_w: string, p: string) { throw new Error(`not found: ${p}`); },
+    async readFile(_w: string, p: string) { return { path: p, content: 'export const value = 1\n', size: 23 }; },
     async writeFile(_w: string, p: string, c: string) { log.order.push(`write:${p}`); return { bytes: c.length }; },
     async tree() { return { root: '/proj', entries: [{ path: 'src/app.ts', type: 'file', size: 10 }] }; },
     async statPath() { return { exists: true, type: 'dir', empty: false, entryCount: 1 }; },
@@ -114,6 +114,7 @@ async function launch(companion: CC, cfg: CollabTaskConfig, mesh?: FakeMesh, onE
     workspaceContext: { platform: 'linux', workspacePath: '/proj' },
     onEvent: onEvent ?? (() => {}),
     signal: undefined,
+    clientForMachine: () => companion,
   } as any);
   const report = await handle.done;
   return { handle, report, mesh: m };
@@ -161,10 +162,11 @@ describe('startCollabRun — the real Control Center start dispatcher', () => {
       planner: [{ toolCalls: [{ id: 's1', name: 'finish', args: { summary: 'PLAN:\n1. do it\n2. verify' } }] }],
       repair: [],
       tasks: [
+        { toolCalls: [{ id: 's1', name: 'finish', args: { summary: 'PLAN:\n1. do it\n2. verify' } }] },
         { toolCalls: [{ id: 's2', name: 'finish', args: { summary: 'implemented' } }] },
         { toolCalls: [{ id: 's3', name: 'finish', args: { summary: 'tests pass' } }] },
-        { toolCalls: [{ id: 's4', name: 'finish', args: { summary: 'approved' } }] },
-        { toolCalls: [{ id: 's5', name: 'finish', args: { summary: 'approved' } }] },
+        { toolCalls: [{ id: 's4', name: 'read_file', args: { path: 'src/app.ts' } }] },
+        { toolCalls: [{ id: 's5', name: 'finish', args: { summary: 'VERDICT: APPROVE' } }] },
       ],
     }, log);
     const mesh = new FakeMesh();
