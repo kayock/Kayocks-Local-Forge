@@ -56,11 +56,32 @@ if (process.env.LOCALFORGE_CI_ARGV_TRACE === '1') {
   }))));
 }
 
+// The Windows tray starts the executable with --port and --home only. The
+// saved network.json is the connection setting the previous companion was
+// already using. An explicit --host or LOCALFORGE_HOST still wins.
+export function parseSavedNetwork(raw) {
+  const host = raw && typeof raw.host === 'string' ? raw.host.trim() : '';
+  if (!host || !/^[a-zA-Z0-9.:_-]{1,253}$/.test(host)) return null;
+  return { host, lan: raw.lanEnabled === true || !['127.0.0.1', '::1', 'localhost'].includes(host) };
+}
+
+export function readSavedNetwork(home) {
+  if (process.platform !== 'win32' || !home) return null;
+  try {
+    return parseSavedNetwork(JSON.parse(fs.readFileSync(path.join(home, 'network.json'), 'utf8')));
+  } catch {
+    return null;
+  }
+}
+
+const configHome = args.home || process.env.LOCALFORGE_HOME || defaultHome();
+const savedNetwork = args.host || process.env.LOCALFORGE_HOST ? null : readSavedNetwork(configHome);
+
 export const config = {
-  home: args.home || process.env.LOCALFORGE_HOME || defaultHome(),
+  home: configHome,
   port: args.port !== undefined ? args.port : (process.env.LOCALFORGE_PORT ? Number(process.env.LOCALFORGE_PORT) : 7337),
-  host: args.host || process.env.LOCALFORGE_HOST || '127.0.0.1',
-  lan: args.lan || false,
+  host: args.host || process.env.LOCALFORGE_HOST || savedNetwork?.host || '127.0.0.1',
+  lan: args.lan || savedNetwork?.lan || false,
   workspace: args.workspace || null,
   showCode: !!args.showCode,
   statusFile: args.statusFile || null,

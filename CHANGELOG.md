@@ -8,7 +8,7 @@ A planner reply without a `PLAN:` section is a missing deliverable, not a comple
 
 The text tool helper, context compaction, and backend thinking controls are unchanged.
 
-The Windows companion compile embeds `localforgeRelease` in the executable. Embedding the numeric package version made a Windows build report `0.5.0` while a source checkout reported the release candidate.
+The Windows companion compile embeds `localforgeRelease` in the executable. Embedding the numeric package version made a Windows build report `0.5.0` while a source checkout reported the release candidate. On Windows, a saved `network.json` supplies the bind address when the tray starts the companion without a `--host` flag. An explicit host flag still wins, and Linux companions are unchanged.
 
 ## v0.5.0 RC5 — collaboration reliability (v0.5-dev, 2026-11-24)
 
