@@ -31,6 +31,7 @@ import {
   extractAcceptanceCommands,
   assessReviewEvidence,
   parseReviewerVerdict,
+  plannerRetryTask,
   planningDeliverable,
   requiredReviewPaths,
   reviewFollowup,
@@ -553,7 +554,7 @@ export class Coordinator {
     let deliverable = planningDeliverable(planRun.r.content || '', planRun.r.messages || []);
     if (deliverable.status === 'MISSING') {
       this.cfg.onEvent({ type: 'notice', message: 'Planner omitted the PLAN: section. Asking once. A rejected tool call did not create a file, and this is not a completed plan.' });
-      const planRetry = await this.runAgent('planner', planAssign.target, 'Your previous reply had no PLAN: section, so planning is not complete. A rejected tool call did not create or change any file. Do not claim that a file exists. Call finish. The summary must contain a section titled PLAN: with numbered steps and the exact acceptance command. Do not call write_file, edit_file, list_dir, or run_command.', []);
+      const planRetry = await this.runAgent('planner', planAssign.target, plannerRetryTask(this.cfg.task), []);
       totalTurns += planRetry.r.turns;
       results.push({ stage: 'planner', assignmentId: planRetry.assignment.id, agentId: planRetry.assignment.agentId, machine: planAssign.target.machineName, model: planAssign.target.model, summary: planRetry.r.content || planRetry.r.note || '(no summary returned)', turns: planRetry.r.turns, conflict: planRetry.conflict, escalated: false, hitTurnLimit: planRetry.r.hitTurnLimit });
       if (planRetry.conflict) conflicts.push(planRetry.conflict);

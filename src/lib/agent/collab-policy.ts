@@ -1,6 +1,7 @@
 // Collaboration outcomes. A process that returns is not the same thing as an
 // accepted development task. A missing reviewer verdict is not a request
 // for changes.
+import { detectToolDialect } from './dialects';
 
 export type ReviewerVerdict = 'APPROVE' | 'REQUEST_CHANGES' | 'BLOCKED' | 'UNKNOWN';
 
@@ -203,15 +204,11 @@ function callsFromAssistant(message: TranscriptMessage): { name: string; path: s
   if (message.toolCalls?.length) {
     return message.toolCalls.map((call) => ({ name: String(call.name || ''), path: argPath(call.args) }));
   }
-  const text = String(message.content || '').trim();
-  if (!text.startsWith('{')) return [];
-  try {
-    const obj = JSON.parse(text) as { tool?: string; name?: string; args?: Record<string, unknown>; arguments?: Record<string, unknown> };
-    const name = String(obj.tool || obj.name || '');
-    return name ? [{ name, path: argPath(obj.args || obj.arguments) }] : [];
-  } catch {
-    return [];
-  }
+  // The runner executes a tool call that is embedded after a sentence. Evidence
+  // uses that same detection, so a genuine read is not dropped for a preamble.
+  const parsed = detectToolDialect(String(message.content || ''));
+  if (!parsed) return [];
+  return [{ name: parsed.action.tool, path: argPath(parsed.action.args) }];
 }
 
 export function toolResultFailed(content: string): boolean {
@@ -291,4 +288,18 @@ export function planningDeliverable(summary: string, messages: TranscriptMessage
     };
   }
   return { status: 'DELIVERED', plan: [plan, rejection].filter(Boolean).join('\n\n') };
+}
+
+// The retry still has to carry the task. A prompt that only says "add PLAN:"
+// lets the model answer that no task was provided.
+export function plannerRetryTask(task: string): string {
+  return [
+    'Your previous reply had no PLAN: section, so planning is not complete.',
+    'A rejected tool call did not create or change any file. Do not claim that a file exists.',
+    'Call finish. The summary must contain a section titled PLAN: with numbered steps and the exact acceptance command.',
+    'Do not call write_file, edit_file, list_dir, or run_command.',
+    '',
+    'TASK:',
+    String(task || '').trim(),
+  ].join('\n');
 }

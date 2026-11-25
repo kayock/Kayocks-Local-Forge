@@ -16,6 +16,7 @@ import {
   parseReviewerVerdict,
   assessReviewEvidence,
   completionFor,
+  plannerRetryTask,
   planningDeliverable,
   requiredReviewPaths,
   reviewFollowup,
@@ -354,6 +355,19 @@ describe('reviewer verdict and coordinator follow-up', () => {
     expect(missing.plan).toContain('Planning deliverable: MISSING');
     expect(missing.plan).toContain('write_file work/mul.py was rejected');
     expect(missing.plan).toContain('Do not treat the planner\'s claims as created files.');
+    const retry = plannerRetryTask('Create work/mul.py. Acceptance command: python3 -m unittest work.test_mul');
+    expect(retry).toContain('TASK:');
+    expect(retry).toContain('Create work/mul.py');
+    expect(retry).toContain('did not create');
+    expect(retry).toContain('PLAN:');
+  });
+
+  test('a read is counted when the model writes a sentence before the tool JSON', () => {
+    const reads = reviewReads([
+      { role: 'assistant', content: 'Reading the implementation.\n{"tool":"read_file","args":{"path":"work/mul.py"}}' },
+      { role: 'user', content: '[TOOL RESULT] read_file \ndef mul(a, b):\n    return a * b\n' },
+    ]);
+    expect(assessReviewEvidence(reads, ['work/mul.py'])).toEqual({ sufficient: true, missing: [] });
   });
 });
 

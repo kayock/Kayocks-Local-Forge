@@ -4,7 +4,7 @@
 
 A reviewer `VERDICT: APPROVE` is not acceptance unless that reviewer successfully read the files this task changed. A directory listing does not count, and a failed read does not count. The requirement stays on the changed implementation and tests, capped so a large tree is not read in full. Missing inspection gets one retry and then `REVIEW_EVIDENCE_MISSING`. It does not start the debugger. A missing verdict is still `VERDICT_MISSING`.
 
-A planner reply without a `PLAN:` section is a missing deliverable, not a completed plan. One retry asks for the section. A rejected planner tool call is recorded as a call that changed nothing, and that note is what the coder receives instead of the planner's claim.
+A planner reply without a `PLAN:` section is a missing deliverable, not a completed plan. One retry asks for the section and repeats the original task. A rejected planner tool call is recorded as a call that changed nothing, and that note is what the coder receives instead of the planner's claim. A text-protocol read still counts when the model writes a sentence before the tool JSON, because evidence follows the call that actually ran.
 
 The text tool helper, context compaction, and backend thinking controls are unchanged.
 

@@ -1157,8 +1157,9 @@ export class AgentRunner {
       const action = detectToolDialect(streamedText);
       if (action) this.noteDialect(action.dialect);
       if (!usedNative && action) {
-        this.messages.push({ role: 'assistant', content: streamedText });
-        const r = await this.runOneCall({ id: `fb_${turn}`, name: action.action.tool, args: action.action.args }, null);
+        const textCall = { id: `fb_${turn}`, name: action.action.tool, args: action.action.args };
+        this.messages.push({ role: 'assistant', content: streamedText, toolCalls: [textCall] });
+        const r = await this.runOneCall(textCall, null);
         if (callProgressed(r.entry)) turnProgress = true;
         if (this.stallStop) {
           const stalled = this.finalizeStalled();
@@ -1204,8 +1205,9 @@ export class AgentRunner {
       if (textAction) {
         this.noteDialect(textAction.dialect);
         this.emit({ type: 'notice', message: `Model emitted its tool call as text (${textAction.dialect} dialect) — executing ${canonicalToolName(textAction.action.tool)}.` });
-        this.messages.push({ role: 'assistant', content: streamedText });
-        const r = await this.runOneCall({ id: `nt_${turn}`, name: textAction.action.tool, args: textAction.action.args }, null);
+        const textCall = { id: `nt_${turn}`, name: textAction.action.tool, args: textAction.action.args };
+        this.messages.push({ role: 'assistant', content: streamedText, toolCalls: [textCall] });
+        const r = await this.runOneCall(textCall, null);
         if (callProgressed(r.entry)) turnProgress = true;
         if (this.stallStop) {
           const stalled = this.finalizeStalled();
